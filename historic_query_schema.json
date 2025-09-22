@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vistas.lanot.unam.mx/historic_query_schema.json",
+  "title": "Esquema para consulta historica LANOT",
+  "description": "Soporta el formato original de fechas como objeto",
+  "type": "object",
+  "properties": {
+    "sat": {
+      "type": "string",
+      "enum": ["GOES-East", "GOES-West", "GOES-16", "GOES-18", "GOES-19"],
+      "default": "GOES-East"
+    },
+    "nivel": {
+      "type": "string",
+      "description": "Nivel de procesamiento de los datos"
+    },
+    "dominio": {
+      "type": "string",
+      "description": "Dominio o región geográfica"
+    },
+    "productos": {
+      "type": "array",
+      "description": "Productos derivados",
+      "items": {
+        "type": "string"
+      }
+    },
+    "bandas": {
+      "type": "array",
+      "description": "Bandas espectrales",
+      "items": {
+        "type": "string"
+      }
+    },
+    "fechas": {
+      "type": "object",
+      "description": "Fechas con conjuntos de horarios",
+      "patternProperties": {
+        "^\\d{4}(0[1-9]|1[0-2])(0[1-9]|[12]\\d|3[01])(-\\d{4}(0[1-9]|1[0-2])(0[1-9]|[12]\\d|3[01]))?$": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^([01]\\d|2[0-3]):([0-5]\\d)(-([01]\\d|2[0-3]):([0-5]\\d))?$"
+          },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false,
+      "minProperties": 1
+    },
+    "version": {
+      "type": "string",
+      "description": "Versión del formato de datos",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "creado_por": {
+      "type": "string",
+      "description": "Usuario o sistema que creó la solicitud",
+      "maxLength": 100
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Fecha y hora de creación en formato ISO 8601"
+    }
+  },
+  "required": ["nivel", "fechas"],
+  "additionalProperties": false
+}
