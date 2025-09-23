@@ -1,48 +1,69 @@
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from config import SatelliteConfig  # ← Importación centralizada
+from config import SatelliteConfigGOES
 
 class HistoricQueryRequest(BaseModel):
     sat: Optional[str] = Field(
-        default=SatelliteConfig.DEFAULT_SATELLITE,
-        description=f"Satélite. Valores válidos: {SatelliteConfig.VALID_SATELLITES}"
+        default=SatelliteConfigGOES.DEFAULT_SATELLITE,
+        description=f"Satélite. Valores válidos: {SatelliteConfigGOES.VALID_SATELLITES}"
     )
     nivel: str = Field(
-        ...,
-        description=f"Nivel de procesamiento. Valores válidos: {SatelliteConfig.VALID_LEVELS}"
+        default=SatelliteConfigGOES.DEFAULT_LEVEL,
+        description=f"Nivel de procesamiento. Valores válidos: {SatelliteConfigGOES.VALID_LEVELS}"
     )
-    dominio: Optional[str] = Field(None, description="Dominio geográfico")
-    productos: Optional[List[str]] = Field(None, description="Productos solicitados")
-    bandas: Optional[List[str]] = Field(None, description="Bandas espectrales")
+    dominio: Optional[str] = Field(
+        None, 
+        description=f"Dominio geográfico. Valores válidos: {SatelliteConfigGOES.VALID_DOMAINS}"
+    )
+    productos: Optional[List[str]] = Field(
+        None, 
+        description=f"Productos solicitados. Valores válidos: {SatelliteConfigGOES.VALID_PRODUCTS}"
+    )
+    bandas: Optional[List[str]] = Field(
+        default=SatelliteConfigGOES.DEFAULT_BANDAS,
+        description=f"Bandas espectrales. Valores válidos: {SatelliteConfigGOES.VALID_BANDAS_INCLUDING_ALL}. Use 'ALL' para todas las bandas."
+    )
     fechas: Dict[str, List[str]] = Field(..., description="Fechas con horarios")
     
     @validator('sat')
     def validate_sat(cls, v):
-        if not SatelliteConfig.is_valid_satellite(v):
-            raise ValueError(f"Satélite debe ser uno de: {SatelliteConfig.VALID_SATELLITES}")
+        if not SatelliteConfigGOES.is_valid_satellite(v):
+            raise ValueError(f"Satélite debe ser uno de: {SatelliteConfigGOES.VALID_SATELLITES}")
         return v
     
     @validator('nivel')
     def validate_nivel(cls, v):
-        if v not in SatelliteConfig.VALID_LEVELS:
-            raise ValueError(f"Nivel debe ser uno de: {SatelliteConfig.VALID_LEVELS}")
+        if not SatelliteConfigGOES.is_valid_level(v):
+            raise ValueError(f"Nivel debe ser uno de: {SatelliteConfigGOES.VALID_LEVELS}")
         return v
+    
+    @validator('dominio')
+    def validate_dominio(cls, v):
+        if v is not None and not SatelliteConfigGOES.is_valid_domain(v):
+            raise ValueError(f"Dominio debe ser uno de: {SatelliteConfigGOES.VALID_DOMAINS}")
+        return v
+    
+    @validator('bandas')
+    def validate_bandas(cls, v):
+        """Valida las bandas - el usuario debe usar formato '01', '02', etc. o 'ALL'"""
+        bandas_validadas = SatelliteConfigGOES.validate_bandas(v)
+        
+        if not bandas_validadas:
+            raise ValueError(
+                f"Bandas inválidas. Use formato: {SatelliteConfigGOES.VALID_BANDAS} o 'ALL'"
+            )
+        
+        return bandas_validadas
     
     @validator('productos')
     def validate_productos(cls, v):
         if v is not None:
             for producto in v:
-                if producto not in SatelliteConfig.VALID_PRODUCTS:
-                    raise ValueError(f"Producto inválido: {producto}. Válidos: {SatelliteConfig.VALID_PRODUCTS}")
+                if producto not in SatelliteConfigGOES.VALID_PRODUCTS:
+                    raise ValueError(f"Producto inválido: {producto}. Válidos: {SatelliteConfigGOES.VALID_PRODUCTS}")
         return v
-
-    @validator('fechas')
-    def validate_fechas(cls, v):
-        if not v:
-            raise ValueError("Debe haber al menos una fecha")
-        return v
-
+        
 class HistoricQueryResponse(BaseModel):
     success: bool
     message: str

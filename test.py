@@ -1,5 +1,7 @@
 import requests
 import json
+import sys
+
 
 # URL de tu API
 BASE_URL = "http://localhost:8000"
@@ -15,9 +17,15 @@ query_data = {
     }
 }
 
+if len(sys.argv) > 1:
+	with open(sys.argv[1], 'r') as file:
+		strjson = file.read()
+		query_data = json.loads(strjson)
+		
 # Validar query
 response = requests.post(f"{BASE_URL}/api/validate", json=query_data)
-print("Validación:", response.json())
+print("Validación:", response)
+#print("Validación:", response.json())
 
 # Analizar query
 response = requests.post(f"{BASE_URL}/api/analyze", json=query_data)

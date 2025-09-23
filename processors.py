@@ -1,16 +1,14 @@
 from datetime import datetime, time
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict
-import fastjsonschema
-from config import SatelliteConfig
-
+from config import SatelliteConfigGOES
 
 @dataclass
 class Horario:
     inicio: time
     fin: time
     duracion_horas: float = field(init=False)
-
+    
     def __post_init__(self):
         inicio_dt = datetime.combine(datetime.today(), self.inicio)
         fin_dt = datetime.combine(datetime.today(), self.fin)
@@ -21,7 +19,7 @@ class Fecha:
     fecha: str
     horarios: List[Horario]
     total_horas: float = field(init=False)
-
+    
     def __post_init__(self):
         self.total_horas = sum(horario.duracion_horas for horario in self.horarios)
 
@@ -32,27 +30,20 @@ class HistoricQuery:
     fechas: List[Fecha]
     dominio: Optional[str] = None
     productos: Optional[List[str]] = None
-    bandas: Optional[List[str]] = None
+    bandas: Optional[List[str]] = None  # ← Corregido a "bandas"
     total_horas: float = field(init=False)
     total_fechas: int = field(init=False)
-
+    
     def __post_init__(self):
         self.total_horas = sum(fecha.total_horas for fecha in self.fechas)
         self.total_fechas = len(self.fechas)
 
 class HistoricQueryProcessor:
     def __init__(self):
-        # Usar configuración centralizada en lugar de valores hardcodeados
-        self.satelites_validos = SatelliteConfig.VALID_SATELLITES
-        self.satelite_por_defecto = SatelliteConfig.DEFAULT_SATELLITE
-        self.niveles_validos = SatelliteConfig.VALID_LEVELS
+        self.satellites_validos = SatelliteConfigGOES.VALID_SATELLITES
+        self.default_satellite = SatelliteConfigGOES.DEFAULT_SATELLITE
+        self.levels_validos = SatelliteConfigGOES.VALID_LEVELS
     
-    def procesar_request(self, request_data: Dict) -> 'HistoricQuery':
-        # Validar satélite usando configuración centralizada
-        satelite = request_data.get('sat', self.satelite_por_defecto)
-        if satelite not in self.satelites_validos:
-            satelite = self.satelite_por_defecto
-            
     def procesar_request(self, request_data: Dict) -> HistoricQuery:
         """Convierte JSON request a estructura de datos"""
         def parsear_horario(horario_str: str) -> Horario:
@@ -64,22 +55,26 @@ class HistoricQueryProcessor:
             else:
                 tiempo = datetime.strptime(horario_str, "%H:%M").time()
                 return Horario(tiempo, tiempo)
-
+        
         # Convertir fechas
         fechas = []
         for fecha_str, horarios_str in request_data['fechas'].items():
             horarios = [parsear_horario(h) for h in horarios_str]
             fechas.append(Fecha(fecha_str, horarios))
-
+        
+        # Validar y expandir bandas si es necesario
+        bandas = request_data.get('bandas', SatelliteConfigGOES.DEFAULT_BANDAS)
+        bandas_expandidas = SatelliteConfigGOES.expand_bandas(bandas)
+        
         return HistoricQuery(
-            satelite=request_data.get('sat', 'GOES-EAST'),
-            nivel=request_data['nivel'],
+            satelite=request_data.get('sat', self.default_satellite),
+            nivel=request_data.get('nivel', SatelliteConfigGOES.DEFAULT_LEVEL),
             fechas=fechas,
             dominio=request_data.get('dominio'),
             productos=request_data.get('productos'),
-            bandas=request_data.get('bandas')
+            bandas=bandas_expandidas
         )
-
+        
     def generar_analisis(self, query: HistoricQuery) -> Dict:
         """Genera análisis de la query"""
         from collections import defaultdict
@@ -103,3 +98,4 @@ class HistoricQueryProcessor:
             'distribucion_horaria': dict(sorted(distribucion.items())),
             'timestamp': datetime.now()
         }
+	
