@@ -1,6 +1,6 @@
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 from config import SatelliteConfigGOES
 
 @dataclass
@@ -22,6 +22,42 @@ class Fecha:
     
     def __post_init__(self):
         self.total_horas = sum(horario.duracion_horas for horario in self.horarios)
+    
+    # ✅ AGREGAR ESTOS MÉTODOS NUEVOS:
+    def es_intervalo(self) -> bool:
+        """Determina si la fecha es un intervalo"""
+        return '-' in self.fecha
+    
+    def expandir_fechas(self) -> List[str]:
+        """Expande un intervalo de fechas a fechas individuales"""
+        if not self.es_intervalo():
+            return [self.fecha]
+        
+        fecha_inicio_str, fecha_fin_str = self.fecha.split('-')
+        fecha_inicio = datetime.strptime(fecha_inicio_str, "%Y%m%d")
+        fecha_fin = datetime.strptime(fecha_fin_str, "%Y%m%d")
+        
+        fechas_expandidas = []
+        current_date = fecha_inicio
+        while current_date <= fecha_fin:
+            fechas_expandidas.append(current_date.strftime("%Y%m%d"))
+            current_date += timedelta(days=1)
+        
+        return fechas_expandidas
+    
+    def obtener_horarios_str(self) -> List[str]:
+        """Convierte horarios a formato string HH:mm-HH:mm"""
+        horarios_str = []
+        for horario in self.horarios:
+            if horario.inicio == horario.fin:
+                # Horario individual
+                horarios_str.append(horario.inicio.strftime("%H:%M"))
+            else:
+                # Intervalo de horarios
+                horarios_str.append(
+                    f"{horario.inicio.strftime('%H:%M')}-{horario.fin.strftime('%H:%M')}"
+                )
+        return horarios_str
 
 @dataclass
 class HistoricQuery:
@@ -30,13 +66,50 @@ class HistoricQuery:
     fechas: List[Fecha]
     dominio: Optional[str] = None
     productos: Optional[List[str]] = None
-    bandas: Optional[List[str]] = None  # ← Corregido a "bandas"
+    bandas: Optional[List[str]] = None
     total_horas: float = field(init=False)
     total_fechas: int = field(init=False)
     
     def __post_init__(self):
         self.total_horas = sum(fecha.total_horas for fecha in self.fechas)
         self.total_fechas = len(self.fechas)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Reconstruye el formato original pero expande intervalos de fechas
+        """
+        fechas_dict = {}
+        
+        for fecha_obj in self.fechas:
+            fechas_individuales = fecha_obj.expandir_fechas()
+            horarios_str = fecha_obj.obtener_horarios_str()
+            
+            for fecha_str in fechas_individuales:
+                fechas_dict[fecha_str] = horarios_str.copy()
+        
+        return {
+            'satelite': self.satelite,
+            'nivel': self.nivel,
+            'dominio': self.dominio,
+            'productos': self.productos,
+            'bandas': self.bandas,
+            'fechas': fechas_dict,
+            'total_horas': self.total_horas,
+            'total_fechas_expandidas': len(fechas_dict)
+        }
+ 
+    
+    def obtener_fechas_individuales(self) -> List[str]:
+        """Devuelve todas las fechas individuales (expandidas)"""
+        fechas_individuales = []
+        for fecha_obj in self.fechas:
+            fechas_individuales.extend(fecha_obj.expandir_fechas())
+        return sorted(fechas_individuales)
+    
+    def contar_fechas_reales(self) -> int:
+        """Cuenta fechas individuales después de expandir intervalos"""
+        return len(self.obtener_fechas_individuales())
+
 
 class HistoricQueryProcessor:
     def __init__(self):

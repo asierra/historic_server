@@ -67,31 +67,9 @@ async def validate_query(request: HistoricQueryRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error procesando query: {str(e)}")
 
-# ... resto de endpoints
 @app.get("/")
 async def root():
     return {"message": "Historic Query API", "status": "active"}
-
-@app.post("/api/validate", response_model=HistoricQueryResponse)
-async def validate_query(request: HistoricQueryRequest):
-    """Valida y procesa una query histórica"""
-    try:
-        query = processor.procesar_request(request.dict())
-        
-        return HistoricQueryResponse(
-            success=True,
-            message="Query válida y procesada exitosamente",
-            data=request.dict(),
-            total_horas=query.total_horas,
-            total_fechas=query.total_fechas,
-            timestamp=datetime.now()
-        )
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Error procesando query: {str(e)}"
-        )
 
 @app.post("/api/analyze", response_model=AnalysisResponse)
 async def analyze_query(request: HistoricQueryRequest):
@@ -116,6 +94,21 @@ async def get_satelites():
         "default": "GOES-EAST"
     }
 
+@app.post("/api/query", response_model=HistoricQueryResponse)
+async def init_query(request: HistoricQueryRequest):
+    """Inicia una query histórica en el servidor de datos"""
+    try:
+        query = processor.procesar_request(request.dict())
+        analisis = processor.generar_analisis(query)
+        
+        return AnalysisResponse(**analisis)
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error analizando query: {str(e)}"
+        )
+        
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",

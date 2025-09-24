@@ -46,15 +46,15 @@ class HistoricQueryRequest(BaseModel):
     
     @validator('bandas')
     def validate_bandas(cls, v):
-        """Valida las bandas - el usuario debe usar formato '01', '02', etc. o 'ALL'"""
-        bandas_validadas = SatelliteConfigGOES.validate_bandas(v)
-        
-        if not bandas_validadas:
-            raise ValueError(
-                f"Bandas inválidas. Use formato: {SatelliteConfigGOES.VALID_BANDAS} o 'ALL'"
-            )
-        
-        return bandas_validadas
+	    """Valida bandas y DEVUELVE ERROR si hay bandas inválidas"""
+	    if v is None:
+	        return SatelliteConfigGOES.DEFAULT_BANDAS
+	    
+	    try:
+	        bandas_validadas = SatelliteConfigGOES.validate_bandas(v)
+	        return bandas_validadas
+	    except ValueError as e:
+	        raise ValueError(str(e))
     
     @validator('productos')
     def validate_productos(cls, v):
