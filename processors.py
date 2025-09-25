@@ -76,7 +76,7 @@ class HistoricQuery:
     
     def to_dict(self) -> Dict[str, Any]:
         """
-        Reconstruye el formato original pero expande intervalos de fechas
+        Convierte a diccionario expandiendo intervalos de fechas
         """
         fechas_dict = {}
         
