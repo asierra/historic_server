@@ -82,8 +82,8 @@ class BackgroundSimulator():
     def _determinar_velocidad(self, query_dict: Dict, velocidad_default: str) -> str:
         """Determina la velocidad basada en la complejidad de la query"""
         total_fechas = query_dict.get('total_fechas_expandidas', 1)
-        total_bandas = len(query_dict.get('bandas', []))
-        total_productos = len(query_dict.get('productos', []))
+        total_bandas = len(query_dict.get('bandas') or [])
+        total_productos = len(query_dict.get('productos') or [])
         
         complejidad = total_fechas * total_bandas * max(1, total_productos)
         
@@ -96,11 +96,11 @@ class BackgroundSimulator():
     
     def _generar_resultados_simulados(self, consulta_id: str, query_dict: Dict) -> Dict:
         """Genera resultados simulados realistas"""
-        fechas = list(query_dict['fechas'].keys())
-        satelite = query_dict['satelite']
-        nivel = query_dict['nivel']
-        productos = query_dict.get('productos', [])
-        bandas = query_dict.get('bandas', [])
+        fechas = list(query_dict.get('fechas', {}).keys())
+        satelite = query_dict.get('satelite', 'unknown')
+        nivel = query_dict.get('nivel', 'unknown')
+        productos = query_dict.get('productos') or []
+        bandas = query_dict.get('bandas') or []
         
         # Simular archivos generados
         archivos_generados = []

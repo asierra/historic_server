@@ -1,262 +1,210 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from schemas import HistoricQueryRequest, HistoricQueryResponse, AnalysisResponse
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Body
+from database import ConsultasDatabase, DATABASE_PATH
+from background_simulator import BackgroundSimulator
 from processors import HistoricQueryProcessor
-from config import SatelliteConfigGOES
+from schemas import HistoricQueryRequest
 from datetime import datetime
+from typing import Dict, Any
+from pydantic import ValidationError
+from config import SatelliteConfigGOES
 import uvicorn
-import json
-from typing import Dict, List, Optional
 import secrets
 import string
 
-from database import ConsultasDatabase
-
-db = ConsultasDatabase()
-
 app = FastAPI(
-    title="Historic Query API - GOES",
-    description="API para procesamiento de solicitudes históricas de datos satelitales GOES",
+    title="LANOT Historic Request",
+    description="API para solicitudes históricas de datos del LANOT",
     version="1.0.0"
 )
 
+# Registro de configuraciones de satélites disponibles
+# A medida que agregues soporte para más satélites, importa su config y añádela aquí.
+AVAILABLE_SATELLITE_CONFIGS = {
+    "GOES": SatelliteConfigGOES(),
+}
+
+# Inicializar componentes
+db = ConsultasDatabase(db_path=DATABASE_PATH)
 processor = HistoricQueryProcessor()
-
-# Simulador temporal en lo que está el real
-from background_simulator import BackgroundSimulator
-procesador = BackgroundSimulator(db)
-
-
-@app.get("/api/config")
-async def get_config():
-    """Devuelve la configuración completa"""
-    return {
-        "satellites": {
-            "validos": SatelliteConfigGOES.VALID_SATELLITES,
-            "default": SatelliteConfigGOES.DEFAULT_SATELLITE
-        },
-        "levels": {
-            "validos": SatelliteConfigGOES.VALID_LEVELS,
-            "default": SatelliteConfigGOES.DEFAULT_LEVEL
-        },
-        "domains": {
-            "validos": SatelliteConfigGOES.VALID_DOMAINS
-        },
-        "bandas": {
-            "validos": SatelliteConfigGOES.VALID_BANDAS_INCLUDING_ALL,
-            "default": SatelliteConfigGOES.DEFAULT_BANDAS,
-            "total_bandas": len(SatelliteConfigGOES.VALID_BANDAS)
-        },
-        "products": {
-            "validos": SatelliteConfigGOES.VALID_PRODUCTS
-        }
-    }
-
-@app.get("/api/config/bandas")
-async def get_bandas_config():
-    """Devuelve configuración de bandas"""
-    return {
-        "bandas_validas": SatelliteConfigGOES.VALID_BANDAS_INCLUDING_ALL,
-        "bandas_por_defecto": SatelliteConfigGOES.DEFAULT_BANDAS,
-        "banda_all": SatelliteConfigGOES.ALL_BANDAS,
-        "total_bandas": len(SatelliteConfigGOES.VALID_BANDAS)
-    }
-
-@app.post("/api/validate", response_model=HistoricQueryResponse)
-async def validate_query(request: HistoricQueryRequest):
-    """Valida y procesa una query histórica"""
-    try:
-        query = processor.procesar_request(request.dict())
-        
-        return HistoricQueryResponse(
-            success=True,
-            message="Query válida y procesada exitosamente",
-            data=request.dict(),
-            total_horas=query.total_horas,
-            total_fechas=query.total_fechas,
-            timestamp=datetime.now()
-        )
-        
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error procesando query: {str(e)}")
-
-
-@app.get("/")
-async def root():
-    return {"message": "Historic Query API", "status": "active"}
-
-
-@app.post("/api/analyze", response_model=AnalysisResponse)
-async def analyze_query(request: HistoricQueryRequest):
-    """Analiza una query histórica y devuelve estadísticas"""
-    try:
-        query = processor.procesar_request(request.dict())
-        analisis = processor.generar_analisis(query)
-        
-        return AnalysisResponse(**analisis)
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Error analizando query: {str(e)}"
-        )
-
-
-@app.get("/api/satelites")
-async def get_satelites():
-    """Devuelve la lista de satélites válidos"""
-    return {
-        "satelites": SatelliteConfigGOES.VALID_SATELLITES,
-        "default": "GOES-EAST"
-    }
+recover = BackgroundSimulator(db)
 
 
 def generar_id_consulta() -> str:
-    """Genera un ID único de 8 caracteres para la consulta"""
     return ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
 
 
-@app.post("/api/query")
-async def crear_consulta(
-    request: HistoricQueryRequest,
-    background_tasks: BackgroundTasks
+@app.get("/")
+async def health_check():
+    """Health check"""
+    return {"status": "active", "timestamp": datetime.now().isoformat()}
+
+def _validate_and_prepare_request(request_data: Dict[str, Any]) -> (Dict[str, Any], Any):
+    """
+    Función de ayuda reutilizable para validar y preparar una solicitud.
+    Levanta HTTPException en caso de error.
+    Devuelve (datos_validados, clase_de_configuracion).
+    """
+    # 1. Validar la estructura básica con Pydantic
+    try:
+        request = HistoricQueryRequest(**request_data)
+    except ValidationError as e:
+        # Pydantic genera errores detallados, los pasamos directamente.
+        raise HTTPException(status_code=422, detail=e.errors())
+
+    # 2. Determinar la configuración correcta (ej. por prefijo del satélite)
+    sat_name = request.sat or AVAILABLE_SATELLITE_CONFIGS["GOES"].DEFAULT_SATELLITE
+    config = None
+    if sat_name.startswith("GOES"):
+        config = AVAILABLE_SATELLITE_CONFIGS["GOES"]
+    # Agrega aquí lógica para otros satélites:
+    # elif sat_name.startswith("JPSS"):
+    #     config = AVAILABLE_SATELLITE_CONFIGS["JPSS"]
+
+    if not config:
+        raise HTTPException(status_code=400, detail=f"Satélite '{sat_name}' no es soportado o es inválido.")
+
+    # 3. Aplicar valores por defecto y validar con la configuración específica
+    data = request.model_dump()
+    data['sat'] = sat_name
+    data['nivel'] = request.nivel or config.DEFAULT_LEVEL
+    data['bandas'] = request.bandas or config.DEFAULT_BANDAS
+
+    if not config.is_valid_satellite(data['sat']):
+        raise ValueError(f"Satélite debe ser uno de: {config.VALID_SATELLITES}")
+    if not config.is_valid_level(data['nivel']):
+        raise ValueError(f"Nivel debe ser uno de: {config.VALID_LEVELS}")
+    if data['dominio'] and not config.is_valid_domain(data['dominio']):
+        raise ValueError(f"Dominio debe ser uno de: {config.VALID_DOMAINS}")
+    
+    data['bandas'] = config.validate_bandas(data['bandas'])
+    return data, config
+
+@app.post("/query")
+async def crear_solicitud(
+    background_tasks: BackgroundTasks,
+    request_data: Dict[str, Any] = Body(...),
 ):
     """
-    Crea una nueva consulta histórica y devuelve un ID único para seguimiento
+    ✅ ENDPOINT PRINCIPAL: Crear y procesar solicitud
     """
     try:
-        # Procesar y convertir a dict en un solo paso
-        query_obj = processor.procesar_request(request.dict())
-        query_dict = query_obj.to_dict()  # ← Única versión necesaria
+        # 1. Validar y preparar la solicitud usando la función de ayuda
+        data, config = _validate_and_prepare_request(request_data)
+        # 2. Procesar la solicitud ya validada y completada
+        query_obj = processor.procesar_request(data, config)
+        query_dict = query_obj.to_dict()
         
-        # Generar ID único
         consulta_id = generar_id_consulta()
         
-        # Guardar en SQLite (solo la query procesada)
         if not db.crear_consulta(consulta_id, query_dict):
             raise HTTPException(status_code=500, detail="Error almacenando consulta")
         
-        # Iniciar procesamiento
-        background_tasks.add_task(procesador.procesar_consulta, consulta_id, query_dict)
-
+        # Procesar en background
+        background_tasks.add_task(recover.procesar_consulta, consulta_id, query_dict)
+        
         return {
             "success": True,
-            "message": "Consulta creada exitosamente",
             "consulta_id": consulta_id,
             "estado": "recibido",
-            "timestamp": datetime.now().isoformat(),
             "resumen": {
                 "satelite": query_dict['satelite'],
                 "nivel": query_dict['nivel'],
-                "total_fechas": query_dict['total_fechas_expandidas'],
-                "total_horas": query_dict['total_horas'],
-                "bandas": len(query_dict['bandas']),
-                "productos": len(query_dict['productos']) if query_dict.get('productos') else 0
+                "fechas": len(query_dict['fechas']),
+                "horas": query_dict['total_horas']
             }
         }
         
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error creando consulta: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
 
-@app.post("/api/query/{consulta_id}/simular-error")
-async def simular_error_consulta(consulta_id: str, background_tasks: BackgroundTasks):
-    """Simula un error en el procesamiento (solo para testing)"""
-    background_tasks.add_task(procesador.simular_error, consulta_id)
-    return {"message": "Simulación de error iniciada"}
+@app.post("/validate")
+async def validar_solicitud(request_data: Dict[str, Any] = Body(...)):
+    """
+    ✅ ENDPOINT DE VALIDACIÓN: Valida el JSON de entrada sin crear una consulta.
+    Devuelve un resumen si es válido, o un error detallado si no lo es.
+    """
+    try:
+        # 1. Validar y preparar la solicitud usando la función de ayuda
+        data, config = _validate_and_prepare_request(request_data)
 
+        # 2. Procesar para obtener el resumen (sin guardar en DB)
+        query_obj = processor.procesar_request(data, config)
+        query_dict = query_obj.to_dict() # Mantenemos to_dict si es un método custom de la dataclass
 
-@app.get("/api/procesador/estadisticas")
-async def obtener_estadisticas_procesador():
-    """Mismo endpoint para ambos procesadores"""
-    # ✅ MISMA LÍNEA PARA AMBOS
-    return procesador.obtener_estadisticas()
+        return {
+            "success": True,
+            "message": "La solicitud es válida.",
+            "resumen_solicitud": {
+                "satelite": query_dict['satelite'],
+                "nivel": query_dict['nivel'],
+                "total_fechas_expandidas": query_dict['total_fechas_expandidas'],
+                "total_horas": query_dict['total_horas'],
+                "bandas_procesadas": query_dict['bandas']
+            }
+        }
+    except ValueError as e:
+        # Convertir errores de validación de lógica de negocio en 400
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException as e:
+        # Relanzar excepciones HTTP que ya vienen preparadas (ej. 422 de Pydantic)
+        raise e
 
-
-@app.get("/api/query/{consulta_id}")
-async def obtener_estado_consulta(consulta_id: str):
-    """Obtiene el estado de una consulta (versión simplificada)"""
+@app.get("/query/{consulta_id}")
+async def obtener_consulta(
+    consulta_id: str,
+    resultados: bool = False,
+):
+    """
+    ✅ ENDPOINT ÚNICO PARA CONSULTAR: Estado y resultados
+    Reemplaza a: /api/query/{id}, /api/query/{id}/resultados, /api/queries
+    """
     consulta = db.obtener_consulta(consulta_id)
     if not consulta:
         raise HTTPException(status_code=404, detail="Consulta no encontrada")
     
-    # Respuesta más limpia
+    # Si se piden resultados específicos y la consulta está completada
+    if resultados and consulta["estado"] == "completado" and consulta.get("resultados"):
+        return {
+            "consulta_id": consulta_id,
+            "estado": "completado",
+            "resultados": consulta["resultados"]
+        }
+    
+    # Estado normal de la consulta
     return {
         "consulta_id": consulta_id,
         "estado": consulta["estado"],
         "progreso": consulta["progreso"],
         "mensaje": consulta["mensaje"],
-        "resumen": {
-            "satelite": consulta["query"]["satelite"],
-            "nivel": consulta["query"]["nivel"],
-            "total_fechas": consulta["query"]["total_fechas_expandidas"],
-            "fechas_ejemplo": list(consulta["query"]["fechas"].keys())[:3]  # Primeras 3
-        },
-        "timestamp_creacion": consulta["timestamp_creacion"],
-        "timestamp_actualizacion": consulta["timestamp_actualizacion"]
+        "timestamp": consulta["timestamp_actualizacion"],
+        "query": consulta["query"] if consulta["estado"] == "recibido" else None
     }
 
-
-@app.get("/api/query/{consulta_id}/resultados")
-async def obtener_resultados_consulta(consulta_id: str):
+@app.get("/queries")
+async def listar_consultas(
+    estado: str = None,
+    limite: int = 20,
+):
     """
-    Obtiene los resultados completos de una consulta completada
+    ✅ LISTADO SIMPLE: Para monitoreo
     """
-    if consulta_id not in consultas_almacenadas:
-        raise HTTPException(status_code=404, detail="Consulta no encontrada")
+    consultas = db.listar_consultas(estado=estado, limite=limite)
     
-    if consulta_id not in RESULTADOS_TEMPORALES:
-        raise HTTPException(status_code=404, detail="Resultados no disponibles")
-    
-    resultados = RESULTADOS_TEMPORALES[consulta_id]
-    
-    if resultados["estado"] != "completado":
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Consulta aún en procesamiento. Estado: {resultados['estado']}"
-        )
-    
-    return {
-        "consulta_id": consulta_id,
-        "estado": "completado",
-        "query_original": consultas_almacenadas[consulta_id]["query_original"],
-        "resultados": resultados["resultados"],
-        "timestamp_completado": resultados["timestamp"]
-    }
-
-@app.get("/api/queries")
-async def listar_consultas(estado: Optional[str] = None):
-    """
-    Lista todas las consultas (opcionalmente filtradas por estado)
-    """
-    consultas = []
-    
-    for consulta_id, info in consultas_almacenadas.items():
-        estado_actual = "en_cola"
-        if consulta_id in RESULTADOS_TEMPORALES:
-            estado_actual = RESULTADOS_TEMPORALES[consulta_id]["estado"]
-        
-        if estado and estado_actual != estado:
-            continue
-            
-        consultas.append({
-            "id": consulta_id,
-            "estado": estado_actual,
-            "satelite": info["query_procesada"]["satelite"],
-            "nivel": info["query_procesada"]["nivel"],
-            "timestamp_creacion": info["timestamp_creacion"],
-            "total_fechas": info["query_procesada"]["total_fechas_expandidas"]
+    # Formato mínimo para listado
+    consultas_simples = []
+    for c in consultas:
+        consultas_simples.append({
+            "id": c["id"],
+            "estado": c["estado"],
+            "progreso": c["progreso"],
+            "satelite": c["query"]["satelite"],
+            "timestamp": c["timestamp_creacion"]
         })
     
     return {
-        "total_consultas": len(consultas),
-        "consultas": sorted(consultas, key=lambda x: x["timestamp_creacion"], reverse=True)
+        "total": len(consultas_simples),
+        "consultas": consultas_simples
     }
 
 if __name__ == "__main__":
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        workers=4
-    )
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -1,68 +1,74 @@
 from typing import List, Dict, Any
+from config_base import SatelliteConfigBase
 
-class SatelliteConfigGOES:
-    """Configuración para descarga histórica de satélites GOES"""
+class SatelliteConfigGOES(SatelliteConfigBase):
+    """Configuration specific to GOES satellites."""
     
-    # Satélites válidos
-    VALID_SATELLITES = ["GOES-EAST", "GOES-WEST", "GOES-16", "GOES-18", "GOES-19"]
-    DEFAULT_SATELLITE = "GOES-EAST"
+    # --- Implementation of Abstract Properties ---
+
+    @property
+    def VALID_SATELLITES(self) -> List[str]:
+        return ["GOES-EAST", "GOES-WEST", "GOES-16", "GOES-18", "GOES-19"]
+
+    @property
+    def DEFAULT_SATELLITE(self) -> str:
+        return "GOES-EAST"
+
+    @property
+    def VALID_LEVELS(self) -> List[str]:
+        return ["L1b", "L2"]
+
+    @property
+    def DEFAULT_LEVEL(self) -> str:
+        return "L1b"
+
+    @property
+    def VALID_DOMAINS(self) -> List[str]:
+        return ["fd", "conus"]
+
+    @property
+    def VALID_PRODUCTS(self) -> List[str]:
+        return [
+            "ADP", "AOD", "ACM", "CMIP", "CODD", "CODN", "CPSD", "CPSN",
+            "ACHA", "ACTP", "CTP", "ACHT", "Rainfall", "SST", "TPW", 
+            "DMW", "DMWV", "LST", "AVIATION_FOG"
+        ]
+
+    @property
+    def VALID_BANDAS(self) -> List[str]:
+        return [f"{i:02d}" for i in range(1, 17)]
+
+    @property
+    def DEFAULT_BANDAS(self) -> List[str]:
+        return ["ALL"]
+
+    # --- Helper Methods ---
     
-    # Niveles válidos
-    VALID_LEVELS = ["L1b", "L2"]
-    DEFAULT_LEVEL = "L1b"
-    
-    # Dominios válidos
-    VALID_DOMAINS = ["fd", "conus"]
-    
-    # Productos válidos
-    VALID_PRODUCTS = [
-        "ADP", "AOD", "ACM", "CMIP", "CODD", "CODN", "CPSD", "CPSN",
-        "ACHA", "ACTP", "CTP", "ACHT", "Rainfall", "SST", "TPW", 
-        "DMW", "DMWV", "LST", "AVIATION_FOG"
-    ]
-    
-    # Bandas válidas (formato "01" al "16")
-    VALID_BANDAS = [f"{i:02d}" for i in range(1, 17)]
-    ALL_BANDAS = "ALL"
-    VALID_BANDAS_INCLUDING_ALL = VALID_BANDAS + [ALL_BANDAS]
-    DEFAULT_BANDAS = [ALL_BANDAS]
-    
-    @classmethod
-    def is_valid_satellite(cls, satellite: str) -> bool:
-        return satellite in cls.VALID_SATELLITES
-    
-    @classmethod
-    def is_valid_level(cls, level: str) -> bool:
-        return level in cls.VALID_LEVELS
-    
-    @classmethod
-    def is_valid_domain(cls, domain: str) -> bool:
-        return domain in cls.VALID_DOMAINS
-    
-    @classmethod
-    def is_valid_banda(cls, banda: str) -> bool:
-        return banda in cls.VALID_BANDAS_INCLUDING_ALL
-    
-    @classmethod
-    def validate_bandas(cls, bandas: List[str]) -> List[str]:
+    def is_valid_satellite(self, satellite: str) -> bool:
+        return satellite in self.VALID_SATELLITES
+
+    def is_valid_level(self, level: str) -> bool:
+        return level in self.VALID_LEVELS
+
+    def is_valid_domain(self, domain: str) -> bool:
+        return domain in self.VALID_DOMAINS
+
+    def validate_bandas(self, bandas: List[str]) -> List[str]:
         """Valida bandas y DEVUELVE ERROR si hay bandas inválidas"""
         if not bandas:
             raise ValueError("La lista de bandas no puede estar vacía")
         
-        # Si hay "ALL", devolver todas las bandas (ignorando las demás)
-        if cls.ALL_BANDAS in bandas:
-            return cls.VALID_BANDAS.copy()
+        if "ALL" in bandas:
+            return ["ALL"] # Return "ALL" to be expanded later by expand_bandas
         
-        # Verificar que todas las bandas sean válidas
-        bandas_invalidas = [banda for banda in bandas if not cls.is_valid_banda(banda)]
+        bandas_invalidas = [banda for banda in bandas if banda not in self.VALID_BANDAS]
         if bandas_invalidas:
-            raise ValueError(f"Bandas inválidas: {bandas_invalidas}. Bandas válidas: {cls.VALID_BANDAS_INCLUDING_ALL}")
+            raise ValueError(f"Bandas inválidas: {bandas_invalidas}. Bandas válidas: {self.VALID_BANDAS}")
         
         return bandas
-    
-    @classmethod
-    def expand_bandas(cls, bandas: List[str]) -> List[str]:
-        """Expande "ALL" a la lista completa de bandas"""
-        if cls.ALL_BANDAS in bandas:
-            return cls.VALID_BANDAS.copy()
+
+    def expand_bandas(self, bandas: List[str]) -> List[str]:
+        """Expands the 'ALL' keyword into the full list of bands."""
+        if "ALL" in bandas:
+            return self.VALID_BANDAS
         return bandas

@@ -8,8 +8,10 @@ from typing import Dict, List, Optional
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+DATABASE_PATH = "consultas_goes.db"
+
 class ConsultasDatabase:
-    def __init__(self, db_path: str = "consultas_goes.db"):
+    def __init__(self, db_path: str = DATABASE_PATH):
         self.db_path = db_path
         logger.info(f"📂 Inicializando base de datos en: {db_path}")
         self._init_db()

@@ -1,7 +1,8 @@
 from datetime import datetime, time, timedelta
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
-from config import SatelliteConfigGOES
+from typing import List, Optional, Dict, Any, TYPE_CHECKING
+if TYPE_CHECKING:
+    from config_base import SatelliteConfigBase
 
 @dataclass
 class Horario:
@@ -112,12 +113,8 @@ class HistoricQuery:
 
 
 class HistoricQueryProcessor:
-    def __init__(self):
-        self.satellites_validos = SatelliteConfigGOES.VALID_SATELLITES
-        self.default_satellite = SatelliteConfigGOES.DEFAULT_SATELLITE
-        self.levels_validos = SatelliteConfigGOES.VALID_LEVELS
     
-    def procesar_request(self, request_data: Dict) -> HistoricQuery:
+    def procesar_request(self, request_data: Dict, config: 'SatelliteConfigBase') -> HistoricQuery:
         """Convierte JSON request a estructura de datos"""
         def parsear_horario(horario_str: str) -> Horario:
             if '-' in horario_str:
@@ -135,13 +132,13 @@ class HistoricQueryProcessor:
             horarios = [parsear_horario(h) for h in horarios_str]
             fechas.append(Fecha(fecha_str, horarios))
         
-        # Validar y expandir bandas si es necesario
-        bandas = request_data.get('bandas', SatelliteConfigGOES.DEFAULT_BANDAS)
-        bandas_expandidas = SatelliteConfigGOES.expand_bandas(bandas)
+        # Los datos ya vienen validados y con valores por defecto.
+        # La única tarea específica de la configuración aquí es expandir las bandas.
+        bandas_expandidas = config.expand_bandas(request_data['bandas'])
         
         return HistoricQuery(
-            satelite=request_data.get('sat', self.default_satellite),
-            nivel=request_data.get('nivel', SatelliteConfigGOES.DEFAULT_LEVEL),
+            satelite=request_data['sat'],
+            nivel=request_data['nivel'],
             fechas=fechas,
             dominio=request_data.get('dominio'),
             productos=request_data.get('productos'),
