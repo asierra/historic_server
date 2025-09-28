@@ -86,8 +86,10 @@ class HistoricQuery:
             fechas_individuales = fecha_obj.expandir_fechas()
             horarios_str = fecha_obj.obtener_horarios_str()
             
-            for fecha_str in fechas_individuales:
-                fechas_dict[fecha_str] = horarios_str.copy()
+            for fecha_ymd_str in fechas_individuales:
+                # Convertir YYYYMMDD a YYYYJJJ para uso interno
+                fecha_yjjj_str = datetime.strptime(fecha_ymd_str, "%Y%m%d").strftime("%Y%j")
+                fechas_dict[fecha_yjjj_str] = horarios_str.copy()
         
         return {
             'satelite': self.satelite,
@@ -98,7 +100,7 @@ class HistoricQuery:
             'bandas': self.bandas,
             'fechas': fechas_dict,
             'total_horas': self.total_horas,
-            'total_fechas_expandidas': len(fechas_dict)
+            'total_fechas_expandidas': len(fechas_dict) # Asegurarse de que este campo esté presente
         }
  
     

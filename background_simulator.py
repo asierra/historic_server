@@ -1,7 +1,7 @@
 import time
 import logging
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict
 from database import ConsultasDatabase
 
@@ -95,34 +95,92 @@ class BackgroundSimulator():
             return "rapido"
     
     def _generar_resultados_simulados(self, consulta_id: str, query_dict: Dict) -> Dict:
-        """Genera resultados simulados realistas"""
-        fechas = list(query_dict.get('fechas', {}).keys())
-        satelite = query_dict.get('satelite', 'unknown')
+        """Genera resultados simulados realistas, imitando la lógica de `RecoverFiles`."""
+        # Extraer parámetros de la consulta
+        satelite = query_dict.get('satelite', 'GOES-16')
+        sensor = query_dict.get('sensor', 'abi')
         nivel = query_dict.get('nivel', 'unknown')
-        productos = query_dict.get('productos') or []
-        bandas = query_dict.get('bandas') or []
+        dominio = query_dict.get('dominio', 'fd')
+        bandas_solicitadas = query_dict.get('bandas') or []
+        productos_solicitados = query_dict.get('productos') or []
         
-        # Simular archivos generados
         archivos_generados = []
-        for i, fecha in enumerate(fechas[:10]):  # Máximo 10 archivos en simulación
-            for producto in productos[:3]:  # Máximo 3 productos
-                archivo = f"GOES16_{satelite}_{nivel}_{producto}_{fecha}_B{bandas[i % len(bandas)] if bandas else 'ALL'}.nc"
-                archivos_generados.append(archivo)
+        sat_code = f"G{satelite.split('-')[-1]}" if '-' in satelite else satelite
+
+        for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
+            fecha_dt = datetime.strptime(fecha_jjj, "%Y%j")
+
+            for horario_str in horarios_list:
+                # Parsear el rango de tiempo solicitado
+                partes = horario_str.split('-')
+                inicio_str = partes[0]
+                fin_str = partes[1] if len(partes) > 1 else inicio_str
+                
+                inicio_dt = fecha_dt.replace(hour=int(inicio_str[:2]), minute=int(inicio_str[3:]))
+                fin_dt = fecha_dt.replace(hour=int(fin_str[:2]), minute=int(fin_str[3:]))
+
+                # Generar timestamps según la frecuencia del dominio
+                current_dt = inicio_dt
+                while current_dt <= fin_dt:
+                    # Determinar si el timestamp actual es válido para el dominio
+                    es_valido = False
+                    if dominio == 'conus' and current_dt.minute % 5 == 1:
+                        es_valido = True
+                    elif dominio == 'fd' and current_dt.minute % 10 == 0:
+                        es_valido = True
+
+                    if es_valido:
+                        # Formato de timestamp para el nombre del archivo (ej. sYYYYJJJHHMMSS)
+                        timestamp_archivo = f"s{current_dt.strftime('%Y%j%H%M')}00"
+
+                        # Construir el nombre del archivo .tgz según el nivel
+                        if nivel == 'L1b':
+                            nombre_tgz = f"OR_{sensor.upper()}-{nivel}-RadF-M6_{sat_code}_{timestamp_archivo}.tgz"
+                        elif nivel == 'L2':
+                            dominio_part = f"_{dominio.upper()}" if dominio else ""
+                            nombre_tgz = f"OR_{sensor.upper()}-{nivel}-Products{dominio_part}_{sat_code}_{timestamp_archivo}.tgz"
+                        else:
+                            nombre_tgz = f"OR_{sensor.upper()}-{nivel}_G{sat_code}_{timestamp_archivo}.tgz"
+                        
+                        # Simular la extracción si no se pidieron todas las bandas
+                        copiar_tgz_completo = False
+                        if nivel == 'L1b':
+                            copiar_tgz_completo = len(bandas_solicitadas) == 16
+                        elif nivel == 'L2':
+                            copiar_tgz_completo = not productos_solicitados
+
+                        if copiar_tgz_completo:
+                            archivos_generados.append(nombre_tgz)
+                        else:
+                            # Si se pidió un subconjunto, simular los archivos .nc extraídos
+                            if nivel == 'L1b':
+                                for banda in bandas_solicitadas:
+                                    nombre_nc = f"OR_{sensor.upper()}-{nivel}-RadF-M6C{banda}_{sat_code}_{timestamp_archivo}_e..._c....nc"
+                                    archivos_generados.append(nombre_nc)
+                            elif nivel == 'L2':
+                                for producto in productos_solicitados:
+                                    dominio_code = dominio[0].upper() if dominio else 'F'
+                                    nombre_nc = f"OR_{sensor.upper()}-{nivel}-{producto}{dominio_code}-M6_{sat_code}_{timestamp_archivo}_e..._c....nc"
+                                    archivos_generados.append(nombre_nc)
+                    
+                    current_dt += timedelta(minutes=1)
         
         # Calcular tamaño total simulado
-        tamaño_mb = len(archivos_generados) * random.uniform(10.0, 50.0)
+        # El tamaño por archivo es menor si son .nc individuales
+        tamaño_por_archivo = random.uniform(100.0, 500.0) if copiar_tgz_completo else random.uniform(20.0, 150.0)
+        tamaño_mb = len(archivos_generados) * tamaño_por_archivo
         
         return {
             "archivos_generados": archivos_generados,
             "total_archivos": len(archivos_generados),
             "tamaño_total_mb": round(tamaño_mb, 2),
             "url_descarga": f"https://storage.ejemplo.com/download/{consulta_id}.zip",
-            "fechas_procesadas": fechas,
-            "productos_generados": productos,
-            "bandas_utilizadas": bandas,
+            "fechas_procesadas": list(query_dict.get('fechas', {}).keys()),
+            "bandas_utilizadas": bandas_solicitadas,
+            "productos_generados": productos_solicitados,
             "timestamp_procesamiento": datetime.now().isoformat(),
             "estadisticas": {
-                "fechas_exitosas": len(fechas),
+                "fechas_exitosas": len(query_dict.get('fechas', {})),
                 "fechas_fallidas": 0,
                 "tiempo_promedio_por_fecha": "45.2 segundos",
                 "calidad_datos": "95.8%"

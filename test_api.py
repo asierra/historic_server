@@ -111,6 +111,34 @@ def test_query_success(monkeypatch):
     assert data["consulta_id"] == "TEST_SUCCESS"
     assert data["resumen"]["satelite"] == "GOES-16"
 
+def test_internal_date_format_is_julian(monkeypatch):
+    """Verifica que el formato de fecha interno en la DB es YYYYJJJ."""
+    TEST_ID = "TEST_JULIAN_DATE"
+    monkeypatch.setattr("main.generar_id_consulta", lambda: TEST_ID)
+
+    # Usamos una fecha conocida: 2023-10-26 es el día 299 del año.
+    request_data = {
+        "sat": "GOES-16",
+        "nivel": "L1b",
+        "bandas": ["02"],
+        "fechas": {
+            "20231026": ["12:00"]
+        }
+    }
+
+    # 1. Crear la consulta
+    response = client.post("/query", json=request_data)
+    assert response.status_code == 200
+
+    # 2. Obtener la consulta directamente de la DB de prueba
+    consulta_guardada = main.db.obtener_consulta(TEST_ID)
+    assert consulta_guardada is not None
+    
+    # 3. Verificar que la clave de fecha es YYYYJJJ
+    fechas_internas = consulta_guardada['query']['fechas']
+    assert "2023299" in fechas_internas
+    assert "20231026" not in fechas_internas
+
 def test_query_and_get_status(monkeypatch):
     """Prueba un flujo completo: crear, monitorear y verificar una consulta."""
     # Definimos un ID de prueba constante para este test

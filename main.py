@@ -13,7 +13,7 @@ import string
 
 app = FastAPI(
     title="LANOT Historic Request",
-    description="API para solicitudes históricas de datos del LANOT",
+    description="API para solicitudes de datos históricos del LANOT",
     version="1.0.0"
 )
 
