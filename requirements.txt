@@ -5,4 +5,4 @@ fastjsonschema
 python-multipart
 pytest
 httpx
-
+s3fs

@@ -57,18 +57,22 @@ class ConsultasDatabase:
             query_json = json.dumps(query_dict, ensure_ascii=False, indent=2)
             print(f"📄 JSON generado: {query_json}")
             logger.debug("✅ Query serializada correctamente a JSON")
+
+            # Extraer el usuario del campo 'creado_por', si no existe, se usará el DEFAULT de la tabla.
+            usuario = query_dict.get('creado_por')
             
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.execute("""
                     INSERT INTO consultas 
-                    (id, estado, query, timestamp_creacion, timestamp_actualizacion)
-                    VALUES (?, ?, ?, ?, ?)
+                    (id, estado, query, timestamp_creacion, timestamp_actualizacion, usuario)
+                    VALUES (?, ?, ?, ?, ?, ?)
                 """, (
                     consulta_id,
                     "recibido",
                     query_json,
                     datetime.now().isoformat(),
-                    datetime.now().isoformat()
+                    datetime.now().isoformat(),
+                    usuario # Si es None, SQLite usará el valor DEFAULT 'anonimo'
                 ))
                 conn.commit()
                 

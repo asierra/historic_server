@@ -69,6 +69,7 @@ class HistoricQuery:
     dominio: Optional[str] = None
     productos: Optional[List[str]] = None
     bandas: Optional[List[str]] = None
+    creado_por: Optional[str] = None
     total_horas: float = field(init=False)
     total_fechas: int = field(init=False)
     
@@ -82,6 +83,7 @@ class HistoricQuery:
         """
         fechas_dict = {}
         
+        original_request_fechas = {} # Para la copia de la solicitud original
         for fecha_obj in self.fechas:
             fechas_individuales = fecha_obj.expandir_fechas()
             horarios_str = fecha_obj.obtener_horarios_str()
@@ -90,7 +92,11 @@ class HistoricQuery:
                 # Convertir YYYYMMDD a YYYYJJJ para uso interno
                 fecha_yjjj_str = datetime.strptime(fecha_ymd_str, "%Y%m%d").strftime("%Y%j")
                 fechas_dict[fecha_yjjj_str] = horarios_str.copy()
+                
+                # Para la copia de la solicitud original, usamos YYYYMMDD expandido
+                original_request_fechas[fecha_ymd_str] = horarios_str.copy()
         
+        # Guardamos una copia de la solicitud original para la reconstrucción de fallos
         return {
             'satelite': self.satelite,
             'sensor': self.sensor,
@@ -98,9 +104,15 @@ class HistoricQuery:
             'dominio': self.dominio,
             'productos': self.productos,
             'bandas': self.bandas,
+            'creado_por': self.creado_por,
             'fechas': fechas_dict,
             'total_horas': self.total_horas,
-            'total_fechas_expandidas': len(fechas_dict) # Asegurarse de que este campo esté presente
+            'total_fechas_expandidas': len(fechas_dict), # Asegurarse de que este campo esté presente
+            '_original_request': {
+                'sat': self.satelite, 'sensor': self.sensor, 'nivel': self.nivel,
+                'dominio': self.dominio, 'productos': self.productos, 'bandas': self.bandas,
+                'creado_por': self.creado_por, 'fechas': original_request_fechas
+            }
         }
  
     
@@ -147,7 +159,8 @@ class HistoricQueryProcessor:
             dominio=request_data.get('dominio'),
             productos=request_data.get('productos'),
             bandas=bandas_expandidas,
-            fechas=fechas
+            fechas=fechas,
+            creado_por=request_data.get('creado_por')
         )
         
     def generar_analisis(self, query: HistoricQuery) -> Dict:

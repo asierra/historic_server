@@ -186,3 +186,43 @@ def test_list_queries():
     assert "total" in data
     assert "consultas" in data
     assert isinstance(data["consultas"], list)
+
+def test_recovery_query_is_generated_on_failure(monkeypatch):
+    """
+    Verifica que se genera una 'consulta_recuperacion' cuando el simulador
+    fuerza un fallo en la recuperación de archivos.
+    """
+    TEST_ID = "TEST_RECOVERY_QUERY"
+
+    # Forzar fallos: hacer que random.random() siempre devuelva un valor alto (e.g., 0.9)
+    # Esto hará que falle la recuperación local (que requiere < 0.8) y la de S3 (que requiere < 0.5)
+    monkeypatch.setattr("random.random", lambda: 0.9)
+    monkeypatch.setattr("main.generar_id_consulta", lambda: TEST_ID)
+
+    # Usar una solicitud simple para que el test sea rápido
+    simple_request = {
+        "sat": "GOES-16",
+        "nivel": "L1b",
+        "bandas": ["02"],
+        "fechas": { "20231026": ["12:00"] }
+    }
+
+    # 1. Crear la consulta
+    create_response = client.post("/query", json=simple_request)
+    assert create_response.status_code == 200
+
+    # 2. Esperar a que se complete
+    for _ in range(10):
+        get_response = client.get(f"/query/{TEST_ID}")
+        if get_response.json()["estado"] == "completado":
+            break
+        time.sleep(1)
+
+    # 3. Obtener los resultados y verificar la consulta de recuperación
+    results_response = client.get(f"/query/{TEST_ID}?resultados=True")
+    assert results_response.status_code == 200
+    resultados = results_response.json()["resultados"]
+    
+    assert "consulta_recuperacion" in resultados
+    assert resultados["consulta_recuperacion"] is not None
+    assert "20231026" in resultados["consulta_recuperacion"]["fechas"]
