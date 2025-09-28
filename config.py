@@ -15,6 +15,14 @@ class SatelliteConfigGOES(SatelliteConfigBase):
         return "GOES-EAST"
 
     @property
+    def VALID_SENSORS(self) -> List[str]:
+        return ["abi", "suvi", "glm"]
+
+    @property
+    def DEFAULT_SENSOR(self) -> str:
+        return "abi"
+
+    @property
     def VALID_LEVELS(self) -> List[str]:
         return ["L1b", "L2"]
 
@@ -46,6 +54,9 @@ class SatelliteConfigGOES(SatelliteConfigBase):
     
     def is_valid_satellite(self, satellite: str) -> bool:
         return satellite in self.VALID_SATELLITES
+
+    def is_valid_sensor(self, sensor: str) -> bool:
+        return sensor in self.VALID_SENSORS
 
     def is_valid_level(self, level: str) -> bool:
         return level in self.VALID_LEVELS

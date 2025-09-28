@@ -66,11 +66,14 @@ def _validate_and_prepare_request(request_data: Dict[str, Any]) -> (Dict[str, An
     # 3. Aplicar valores por defecto y validar con la configuración específica
     data = request.model_dump()
     data['sat'] = sat_name
+    data['sensor'] = request.sensor or config.DEFAULT_SENSOR
     data['nivel'] = request.nivel or config.DEFAULT_LEVEL
     data['bandas'] = request.bandas or config.DEFAULT_BANDAS
 
     if not config.is_valid_satellite(data['sat']):
         raise ValueError(f"Satélite debe ser uno de: {config.VALID_SATELLITES}")
+    if not config.is_valid_sensor(data['sensor']):
+        raise ValueError(f"Sensor debe ser uno de: {config.VALID_SENSORS}")
     if not config.is_valid_level(data['nivel']):
         raise ValueError(f"Nivel debe ser uno de: {config.VALID_LEVELS}")
     if data['dominio'] and not config.is_valid_domain(data['dominio']):
@@ -108,6 +111,7 @@ async def crear_solicitud(
             "estado": "recibido",
             "resumen": {
                 "satelite": query_dict['satelite'],
+                "sensor": query_dict['sensor'],
                 "nivel": query_dict['nivel'],
                 "fechas": len(query_dict['fechas']),
                 "horas": query_dict['total_horas']
@@ -136,6 +140,7 @@ async def validar_solicitud(request_data: Dict[str, Any] = Body(...)):
             "message": "La solicitud es válida.",
             "resumen_solicitud": {
                 "satelite": query_dict['satelite'],
+                "sensor": query_dict['sensor'],
                 "nivel": query_dict['nivel'],
                 "total_fechas_expandidas": query_dict['total_fechas_expandidas'],
                 "total_horas": query_dict['total_horas'],

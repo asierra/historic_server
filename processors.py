@@ -63,8 +63,9 @@ class Fecha:
 @dataclass
 class HistoricQuery:
     satelite: str
+    sensor: str
     nivel: str
-    fechas: List[Fecha]
+    fechas: List[Fecha] = field(repr=False) # No mostrar en el repr por ser muy largo
     dominio: Optional[str] = None
     productos: Optional[List[str]] = None
     bandas: Optional[List[str]] = None
@@ -90,6 +91,7 @@ class HistoricQuery:
         
         return {
             'satelite': self.satelite,
+            'sensor': self.sensor,
             'nivel': self.nivel,
             'dominio': self.dominio,
             'productos': self.productos,
@@ -138,11 +140,12 @@ class HistoricQueryProcessor:
         
         return HistoricQuery(
             satelite=request_data['sat'],
+            sensor=request_data['sensor'],
             nivel=request_data['nivel'],
-            fechas=fechas,
             dominio=request_data.get('dominio'),
             productos=request_data.get('productos'),
-            bandas=bandas_expandidas
+            bandas=bandas_expandidas,
+            fechas=fechas
         )
         
     def generar_analisis(self, query: HistoricQuery) -> Dict:
@@ -159,6 +162,7 @@ class HistoricQueryProcessor:
 
         return {
             'satelite': query.satelite,
+            'sensor': query.sensor,
             'nivel': query.nivel,
             'total_horas': round(query.total_horas, 2),
             'total_fechas': query.total_fechas,

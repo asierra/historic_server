@@ -54,6 +54,7 @@ class RecoverFiles:
         """
         lista_archivos = []
         fechas = query_dict.get('fechas', {})
+        sensor = query_dict.get('sensor', 'abi') # Default a 'abi' si no viene
         bandas = query_dict.get('bandas', [])
 
         for fecha_str in fechas.keys():
@@ -67,11 +68,13 @@ class RecoverFiles:
                 self.logger.warning(f"⚠️ Directorio fuente no encontrado: {directorio_fuente}")
                 continue
 
-            # Aquí buscas los archivos que coincidan con la consulta.
-            # Por ejemplo, si buscas por banda:
+            # Lógica de búsqueda de archivos para el sensor ABI.
+            # Por ahora, ignoramos el valor de 'sensor' y asumimos que es 'abi'.
+            # Ejemplo de nombre de archivo: OR_ABI-L1b-RadF-M6C02_G16_...
             for banda in bandas:
-                # Ejemplo: OR_ABI-L1b-RadF-M6C02_G16_...
-                patron_busqueda = f"*C{banda}*.nc"
+                # El patrón busca archivos que contengan la banda específica (ej. _C02_).
+                # Los asteriscos aseguran que coincida sin importar el resto del nombre.
+                patron_busqueda = f"*_C{banda}_*.nc"
                 lista_archivos.extend(directorio_fuente.glob(patron_busqueda))
 
         return lista_archivos

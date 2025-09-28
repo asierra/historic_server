@@ -10,6 +10,7 @@ class HistoricQueryRequest(BaseModel):
     using a configuration class.
     """
     sat: Optional[str] = Field(None, description="Satélite a consultar.")
+    sensor: Optional[str] = Field(None, description="Sensor del satélite (ej. abi, suvi, glm).")
     nivel: Optional[str] = Field(None, description="Nivel de procesamiento.")
     dominio: Optional[str] = Field(None, description="Dominio geográfico.")
     productos: Optional[List[str]] = Field(None, description="Lista de productos derivados.")

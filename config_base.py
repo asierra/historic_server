@@ -21,6 +21,14 @@ class SatelliteConfigBase(ABC):
 
     @property
     @abstractmethod
+    def VALID_SENSORS(self) -> List[str]: ...
+
+    @property
+    @abstractmethod
+    def DEFAULT_SENSOR(self) -> str: ...
+
+    @property
+    @abstractmethod
     def VALID_LEVELS(self) -> List[str]: ...
 
     @property
@@ -42,3 +50,11 @@ class SatelliteConfigBase(ABC):
     @property
     @abstractmethod
     def DEFAULT_BANDAS(self) -> List[str]: ...
+
+    # --- Abstract Helper Methods ---
+
+    @abstractmethod
+    def is_valid_satellite(self, satellite: str) -> bool: ...
+
+    @abstractmethod
+    def is_valid_sensor(self, sensor: str) -> bool: ...
