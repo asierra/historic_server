@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, validator
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 
 class HistoricQueryRequest(BaseModel):
@@ -16,6 +16,14 @@ class HistoricQueryRequest(BaseModel):
     productos: Optional[List[str]] = Field(None, description="Lista de productos derivados.")
     bandas: Optional[List[str]] = Field(None, description="Bandas espectrales. Use 'ALL' para todas.")
     fechas: Dict[str, List[str]] = Field(..., description="Fechas con horarios para la consulta.")
+
+    @validator('bandas', pre=True)
+    def allow_string_for_all_bands(cls, v):
+        """Permite que 'bandas' sea la cadena "ALL" y la convierte en ["ALL"]."""
+        if isinstance(v, str) and v.upper() == 'ALL':
+            return ['ALL']
+        return v
+
 
 class HistoricQueryResponse(BaseModel):
     success: bool
