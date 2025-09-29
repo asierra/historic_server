@@ -82,8 +82,8 @@ class ConsultasDatabase:
         except sqlite3.IntegrityError as e:
             logger.error(f"❌ Error de integridad (ID duplicado?): {e}")
             return False
-        except json.JSONEncodeError as e:
-            logger.error(f"❌ Error serializando JSON: {e}")
+        except TypeError as e:
+            logger.error(f"❌ Error serializando JSON (posiblemente un tipo de dato no serializable): {e}")
             return False
         except Exception as e:
             logger.error(f"❌ Error inesperado en crear_consulta: {e}")
