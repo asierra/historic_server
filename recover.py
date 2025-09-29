@@ -3,26 +3,48 @@ import logging
 import shutil
 import tarfile
 from typing import List, Dict, Optional, NamedTuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import concurrent.futures
 import s3fs
 
 from database import ConsultasDatabase
 
 from collections import defaultdict
  
+import time
 class RecoverFiles:
     """
     Atiende solicitudes de recuperación de archivos de datos desde un almacenamiento local.
     """
-    def __init__(self, db: ConsultasDatabase, 
+    def __init__(self, db: ConsultasDatabase,
         source_data_path: str = "/depot/goes16", base_download_path: str = "/data/tmp",
-        s3_fallback_enabled: bool = True):
+        s3_fallback_enabled: bool = True, max_workers: int = 8):
         self.db = db
         self.source_data_path = Path(source_data_path)
         self.base_download_path = Path(base_download_path)
         self.logger = logging.getLogger(__name__)
+        self.logger.info(f"📂 Inicializando RecoverFiles.")
+        self.max_workers = max_workers
+        self.logger.info(f"   - Max workers para I/O paralelo: {self.max_workers}")
+        self.logger.info(f"   - Origen de datos (Lustre): {self.source_data_path}")
+        self.logger.info(f"   - Directorio de descargas: {self.base_download_path}")
+        self.logger.info(f"   - Fallback a S3: {'Activado' if s3_fallback_enabled else 'Desactivado'}")
+        # --- Configuración para reintentos ---
+        self.S3_RETRY_ATTEMPTS = 3
+        self.S3_RETRY_BACKOFF_SECONDS = 2
+        self.logger.info(f"   - Reintentos S3: {self.S3_RETRY_ATTEMPTS} intentos con backoff inicial de {self.S3_RETRY_BACKOFF_SECONDS}s")
+
         self.s3_fallback_enabled = s3_fallback_enabled
+
+    # Definir la clase anidada aquí, al principio de la clase, para que esté
+    # disponible para todas las anotaciones de tipo de los métodos.
+    class ObjetivoBusqueda(NamedTuple):
+        """Estructura para un archivo potencial que se debe encontrar."""
+        directorio_semana: Path
+        patron_busqueda: str
+        fecha_original: str  # YYYYMMDD o YYYYMMDD-YYYYMMDD
+        horario_original: str # HH:MM o HH:MM-HH:MM
 
     def procesar_consulta(self, consulta_id: str, query_dict: Dict):
         try:
@@ -40,27 +62,33 @@ class RecoverFiles:
             self.db.actualizar_estado(consulta_id, "procesando", 20, f"Identificados {total_objetivos} archivos potenciales a buscar.")
 
             # 3. Procesar cada objetivo y registrar éxitos y fracasos
-            archivos_recuperados = []
+            lustre_recuperados = []
             objetivos_fallidos = []
 
-            for i, objetivo in enumerate(objetivos):
-                # El progreso para la recuperación local va del 20% al 80%
-                progreso = 20 + int(((i + 1) / total_objetivos) * 60)
-                self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Buscando archivo {i+1}/{total_objetivos}")
+            # 3. Procesar cada objetivo en paralelo y registrar éxitos y fracasos
+            if objetivos: # Avoid division by zero if no objectives
+                with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                    # Submit tasks for each objective
+                    future_to_objetivo = {
+                        executor.submit(self._process_single_objective, objetivo, directorio_destino, query_dict): objetivo
+                        for objetivo in objetivos
+                    }
 
-                archivo_encontrado = self._buscar_archivo_para_objetivo(objetivo)
+                    for i, future in enumerate(concurrent.futures.as_completed(future_to_objetivo)):
+                        objetivo = future_to_objetivo[future]
+                        # El progreso para la recuperación local va del 20% al 80%
+                        progreso = 20 + int(((i + 1) / total_objetivos) * 60)
+                        self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Buscando y recuperando archivo {i+1}/{total_objetivos}")
 
-                if archivo_encontrado:
-                    try:
-                        # La función _recuperar_archivo ahora maneja un solo archivo
-                        nuevos_archivos = self._recuperar_archivo(archivo_encontrado, directorio_destino, query_dict)
-                        archivos_recuperados.extend(nuevos_archivos)
-                    except Exception as e:
-                        self.logger.error(f"❌ No se pudo procesar {archivo_encontrado}: {e}")
-                        objetivos_fallidos.append(objetivo)
-                else:
-                    self.logger.warning(f"⚠️ No se encontró archivo local para el objetivo: {objetivo.patron_busqueda}")
-                    objetivos_fallidos.append(objetivo)
+                        try:
+                            result = future.result() # (found_file_path, list_of_recovered_files)
+                            if result and result[0]: # If file was found and processed
+                                lustre_recuperados.extend(result[1])
+                            else: # File not found or error during processing
+                                objetivos_fallidos.append(objetivo)
+                        except Exception as e: # Catch exceptions from _process_single_objective
+                            self.logger.error(f"❌ Error procesando objetivo {objetivo.patron_busqueda}: {e}")
+                            objetivos_fallidos.append(objetivo)
 
             # 3.5 (Opcional) Intentar recuperar los fallidos desde S3
             if self.s3_fallback_enabled and objetivos_fallidos:
@@ -68,15 +96,13 @@ class RecoverFiles:
                 s3_recuperados, objetivos_fallidos_final = self._recuperar_fallidos_desde_s3(
                     objetivos_fallidos, directorio_destino, query_dict
                 )
-                archivos_recuperados.extend(s3_recuperados)
                 objetivos_fallidos = objetivos_fallidos_final # Actualizar la lista de fallidos
-
+            else:
+                s3_recuperados = []
 
             # 4. Generar reporte final
             self.db.actualizar_estado(consulta_id, "procesando", 95, "Generando reporte final")
-            resultados_finales = self._generar_reporte_final(
-                archivos_recuperados, directorio_destino, objetivos_fallidos, query_dict
-            )
+            resultados_finales = self._generar_reporte_final(lustre_recuperados, s3_recuperados, directorio_destino, objetivos_fallidos, query_dict)
             self.db.guardar_resultados(consulta_id, resultados_finales)
 
             self.logger.info(f"✅ Procesamiento completado para {consulta_id}")
@@ -85,14 +111,23 @@ class RecoverFiles:
             self.logger.error(f"❌ Error procesando consulta {consulta_id}: {e}")
             self.db.actualizar_estado(consulta_id, "error", 0, f"Error: {str(e)}")
     
-    class ObjetivoBusqueda(NamedTuple):
-        """Estructura para un archivo potencial que se debe encontrar."""
-        directorio_semana: Path
-        patron_busqueda: str
-        fecha_original: str  # YYYYMMDD o YYYYMMDD-YYYYMMDD
-        horario_original: str # HH:MM o HH:MM-HH:MM
+    def _process_single_objective(self, objetivo: ObjetivoBusqueda, directorio_destino: Path, query_dict: Dict) -> Optional[tuple[Path, List[Path]]]:
+        """
+        Helper function to process a single objective, to be run in a thread pool.
+        Returns (found_file_path, list_of_recovered_files) or None if not found/processed.
+        """
+        archivo_encontrado = self._buscar_archivo_para_objetivo(objetivo)
+        if archivo_encontrado:
+            try:
+                nuevos_archivos = self._recuperar_archivo(archivo_encontrado, directorio_destino, query_dict)
+                return archivo_encontrado, nuevos_archivos
+            except Exception as e:
+                self.logger.error(f"❌ No se pudo procesar {archivo_encontrado}: {e}")
+                return archivo_encontrado, [] # Indicate it was found but failed to process
+        self.logger.warning(f"⚠️ No se encontró archivo local para el objetivo: {objetivo.patron_busqueda}")
+        return None
 
-    def _generar_objetivos_de_busqueda(self, query_dict: Dict) -> List[ObjetivoBusqueda]:
+    def _generar_objetivos_de_busqueda(self, query_dict: Dict) -> List['RecoverFiles.ObjetivoBusqueda']:
         """
         Genera una lista de todos los archivos que *deberían* existir según la consulta.
         """
@@ -109,21 +144,19 @@ class RecoverFiles:
             if query_dict.get(key):
                 base_path /= query_dict[key]
 
-        # Usamos las fechas originales del request para reconstruir la consulta de recuperación
-        fechas_originales = query_dict.get('_original_request', {}).get('fechas', {})
-
         for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
             año = fecha_jjj[:4]
             dia_del_año_int = int(fecha_jjj[4:])
             semana = dia_del_año_int // 7 + 1
 
+            # La ruta base ya incluye sensor/nivel/dominio, ahora añadimos año/semana
             directorio_semana = base_path / año / f"{semana:02d}"
 
             fecha_dt = datetime.strptime(fecha_jjj, "%Y%j")
 
             for horario_str in horarios_list:
                 partes = horario_str.split('-') # Se re-añade este bloque
-                inicio_str, fin_str = partes[0], partes[1] if len(partes) > 1 else partes[0] # Se re-añade este bloque
+                inicio_str, fin_str = partes[0], partes[1] if len(partes) > 1 else partes[0]
                 inicio_dt = fecha_dt.replace(hour=int(inicio_str[:2]), minute=int(inicio_str[3:])) # Se re-añade este bloque
                 fin_dt = fecha_dt.replace(hour=int(fin_str[:2]), minute=int(fin_str[3:])) # Se re-añade este bloque
                 current_dt = inicio_dt # Se re-añade este bloque
@@ -134,15 +167,13 @@ class RecoverFiles:
                         timestamp_archivo = f"s{current_dt.strftime('%Y%j%H%M')}00"
                         patron_busqueda = f"OR_{sensor.upper()}-{nivel}-*-{sat_code}_{timestamp_archivo}.tgz"
 
-                        # Encontrar la fecha y horario original que generó este timestamp
-                        fecha_ymd_str = current_dt.strftime("%Y%m%d")
-                        horario_original_encontrado = self._find_original_request_slot(fecha_ymd_str, horario_str, fechas_originales)
-
+                        # La fecha original para la reconstrucción de fallos es la clave YYYYJJJ del bucle actual.
+                        # El horario original es el rango o valor que estamos iterando.
                         objetivos.append(self.ObjetivoBusqueda(
                             directorio_semana=directorio_semana,
                             patron_busqueda=patron_busqueda,
-                            fecha_original=horario_original_encontrado[0],
-                            horario_original=horario_original_encontrado[1]
+                            fecha_original=fecha_jjj, # Usamos la fecha juliana
+                            horario_original=horario_str
                         ))
                     current_dt += timedelta(minutes=1)
         return objetivos
@@ -187,7 +218,7 @@ class RecoverFiles:
         
         # Si se pidió un subconjunto, abrir el .tgz para extraer selectivamente
         try:
-            with tarfile.open(archivo_fuente, "r:gz") as tar:
+            with tarfile.open(archivo_fuente, "r:gz") as tar: # Puede lanzar ReadError, etc.
                 miembros_a_extraer = []
                 for miembro in tar.getmembers():
                     if not miembro.isfile():
@@ -206,17 +237,21 @@ class RecoverFiles:
                 
                 if miembros_a_extraer:
                     self.logger.debug(f"🔎 Extrayendo {len(miembros_a_extraer)} archivos de {archivo_fuente.name}")
-                    tar.extractall(path=directorio_destino, members=miembros_a_extraer)
+                    tar.extractall(path=directorio_destino, members=miembros_a_extraer) # También puede lanzar errores
                     for miembro in miembros_a_extraer:
                         archivos_recuperados.append(directorio_destino / miembro.name)
-        except (tarfile.TarError, FileNotFoundError) as e:
-            self.logger.error(f"❌ No se pudo procesar el archivo tar {archivo_fuente}: {e}")
+        except (tarfile.ReadError, tarfile.ExtractError, FileNotFoundError) as e:
+            # Capturamos errores específicos de lectura/extracción (archivos corruptos/incompletos)
+            # y relanzamos la excepción para que el objetivo se marque como fallido.
+            self.logger.error(f"❌ Error al procesar el archivo tar {archivo_fuente.name} (posiblemente corrupto): {e}")
+            raise # Relanzar la excepción es CRÍTICO para que el objetivo se marque como fallido.
 
         return archivos_recuperados
 
-    def _generar_reporte_final(self, archivos_recuperados: List[Path], directorio_destino: Path, objetivos_fallidos: List[ObjetivoBusqueda], query_original: Dict) -> Dict:
+    def _generar_reporte_final(self, lustre_recuperados: List[Path], s3_recuperados: List[Path], directorio_destino: Path, objetivos_fallidos: List[ObjetivoBusqueda], query_original: Dict) -> Dict:
         """Genera el diccionario de resultados finales."""
-        total_bytes = sum(f.stat().st_size for f in archivos_recuperados if f.is_file())
+        todos_los_archivos = lustre_recuperados + s3_recuperados
+        total_bytes = sum(f.stat().st_size for f in todos_los_archivos if f.is_file())
         tamaño_mb = round(total_bytes / (1024 * 1024), 2)
 
         # Construir la consulta de recuperación con los objetivos que fallaron
@@ -228,38 +263,43 @@ class RecoverFiles:
 
         consulta_recuperacion = None
         if fechas_fallidas:
-            # Copiamos la solicitud original y reemplazamos las fechas
-            consulta_recuperacion = query_original.get('_original_request', {}).copy()
-            consulta_recuperacion['fechas'] = dict(fechas_fallidas)
             # Opcional: añadir una nota sobre el origen de esta consulta
+            # Reconstruir la consulta de recuperación a partir de la original,
+            # pero convirtiendo las fechas julianas de los fallos de nuevo a YYYYMMDD.
+            fechas_recuperacion_ymd = defaultdict(list)
+            for fecha_jjj, horarios in fechas_fallidas.items():
+                fecha_dt = datetime.strptime(fecha_jjj, "%Y%j")
+                fecha_ymd = fecha_dt.strftime("%Y%m%d")
+                fechas_recuperacion_ymd[fecha_ymd].extend(horarios)
+
+            # Usar la solicitud original como base
+            consulta_recuperacion = query_original.get('_original_request', {}).copy() or {}
+            # Limpiar campos que no son parte de una solicitud
+            consulta_recuperacion.pop('creado_por', None)
+            # Reemplazar con las fechas fallidas
+            consulta_recuperacion['fechas'] = dict(fechas_recuperacion_ymd)
             consulta_recuperacion['descripcion'] = f"Consulta de recuperación para la solicitud original {query_original.get('id')}"
 
         return {
-            "archivos_recuperados": [f.name for f in archivos_recuperados],
-            "total_archivos": len(archivos_recuperados),
+            "fuentes": {
+                "lustre": {
+                    "archivos": [f.name for f in lustre_recuperados],
+                    "total": len(lustre_recuperados)
+                },
+                "s3": {
+                    "archivos": [f.name for f in s3_recuperados],
+                    "total": len(s3_recuperados)
+                }
+            },
+            "total_archivos": len(todos_los_archivos),
             "tamaño_total_mb": tamaño_mb,
             "directorio_destino": str(directorio_destino),
             "timestamp_procesamiento": datetime.now().isoformat(),
             "consulta_recuperacion": consulta_recuperacion
         }
 
-    def _find_original_request_slot(self, fecha_ymd: str, horario_ymd: str, fechas_originales: Dict) -> (str, str):
-        """
-        Encuentra la clave de fecha y valor de horario originales que corresponden
-        a una fecha/hora expandida. Es un helper para reconstruir la consulta de fallos.
-        """
-        # La lógica se simplificó en un paso anterior, pero la mantenemos por si acaso.
-        # Ahora `fechas_originales` tiene claves YYYYMMDD.
-        horarios_list = fechas_originales.get(fecha_ymd, [])
-        for horario_key in horarios_list:
-            if horario_key == horario_ymd:
-                return fecha_ymd, horario_key
-        
-        # Fallback por si algo no coincide (no debería pasar)
-        return fecha_ymd, horario_ymd
-
     def _recuperar_fallidos_desde_s3(self, objetivos_fallidos: List[ObjetivoBusqueda], directorio_destino: Path, query_dict: Dict) -> (List[Path], List[ObjetivoBusqueda]):
-        """
+        """ 
         Intenta descargar desde S3 los archivos que no se encontraron localmente.
         """
         s3 = s3fs.S3FileSystem(anon=True)
@@ -279,7 +319,31 @@ class RecoverFiles:
             self.logger.error("No se puede determinar el producto S3 para la consulta.")
             return [], objetivos_fallidos
 
-        for objetivo in objetivos_fallidos:
+        if objetivos_fallidos:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_to_objetivo_s3 = {
+                    executor.submit(self._download_single_s3_objective, objetivo, directorio_destino, s3, producto_s3): objetivo
+                    for objetivo in objetivos_fallidos
+                }
+
+                for future in concurrent.futures.as_completed(future_to_objetivo_s3):
+                    objetivo = future_to_objetivo_s3[future]
+                    try:
+                        ruta_local_destino = future.result()
+                        if ruta_local_destino:
+                            archivos_s3_recuperados.append(ruta_local_destino)
+                        else:
+                            objetivos_aun_fallidos.append(objetivo)
+                    except Exception as e:
+                        self.logger.error(f"❌ Error durante la recuperación desde S3 para el objetivo {objetivo.patron_busqueda}: {e}")
+                        objetivos_aun_fallidos.append(objetivo)
+
+        return archivos_s3_recuperados, objetivos_aun_fallidos
+
+    def _download_single_s3_objective(self, objetivo: ObjetivoBusqueda, directorio_destino: Path, s3_client: s3fs.S3FileSystem, producto_s3: str) -> Optional[Path]:
+        """Helper function to download a single S3 objective, to be run in a thread pool."""
+        last_exception = None
+        for attempt in range(self.S3_RETRY_ATTEMPTS):
             try:
                 # Extraer año, día juliano y hora del patrón de búsqueda
                 timestamp_str = objetivo.patron_busqueda.split('_s')[1].split('.')[0]
@@ -292,7 +356,7 @@ class RecoverFiles:
                 s3_path_dir = f"s3://noaa-goes16/{producto_s3}/{anio}/{dia_juliano}/{hora}/"
                 
                 # Listar archivos en el directorio S3
-                archivos_en_s3 = s3.ls(s3_path_dir)
+                archivos_en_s3 = s3_client.ls(s3_path_dir)
                 
                 # Buscar el archivo que coincida con nuestro timestamp
                 archivo_s3_a_descargar = None
@@ -301,19 +365,28 @@ class RecoverFiles:
                         archivo_s3_a_descargar = s3_file
                         break
                 
-                if archivo_s3_a_descargar:
-                    nombre_archivo_local = Path(archivo_s3_a_descargar).name
-                    ruta_local_destino = directorio_destino / nombre_archivo_local
-                    
-                    self.logger.info(f"⬇️ Descargando desde S3: {archivo_s3_a_descargar} -> {ruta_local_destino}")
-                    s3.get(archivo_s3_a_descargar, str(ruta_local_destino))
-                    archivos_s3_recuperados.append(ruta_local_destino)
-                else:
+                if not archivo_s3_a_descargar:
                     self.logger.warning(f"❌ No se encontró el archivo en S3 para el objetivo: {objetivo.patron_busqueda}")
-                    objetivos_aun_fallidos.append(objetivo)
+                    return None # No reintentar si el archivo no existe
+
+                nombre_archivo_local = Path(archivo_s3_a_descargar).name
+                ruta_local_destino = directorio_destino / nombre_archivo_local
+                
+                self.logger.info(f"⬇️ Descargando desde S3: {archivo_s3_a_descargar} -> {ruta_local_destino} (Intento {attempt + 1}/{self.S3_RETRY_ATTEMPTS})")
+                s3_client.get(archivo_s3_a_descargar, str(ruta_local_destino))
+                return ruta_local_destino # Éxito, salir de la función
 
             except Exception as e:
-                self.logger.error(f"❌ Error durante la recuperación desde S3 para el objetivo {objetivo.patron_busqueda}: {e}")
-                objetivos_aun_fallidos.append(objetivo)
+                last_exception = e
+                self.logger.warning(f"⚠️ Falló el intento {attempt + 1}/{self.S3_RETRY_ATTEMPTS} para descargar {objetivo.patron_busqueda}: {e}")
+                if attempt < self.S3_RETRY_ATTEMPTS - 1:
+                    wait_time = self.S3_RETRY_BACKOFF_SECONDS * (2 ** attempt) # Backoff exponencial
+                    self.logger.info(f"   Reintentando en {wait_time} segundos...")
+                    time.sleep(wait_time)
 
-        return archivos_s3_recuperados, objetivos_aun_fallidos
+        # Si todos los intentos fallaron, lanzar la última excepción capturada
+        self.logger.error(f"❌ Fallaron todos los {self.S3_RETRY_ATTEMPTS} intentos para descargar desde S3 el objetivo {objetivo.patron_busqueda}.")
+        if last_exception:
+            raise last_exception
+        
+        return None # Fallback en caso de que no haya habido excepción

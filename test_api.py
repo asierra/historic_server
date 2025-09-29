@@ -226,3 +226,87 @@ def test_recovery_query_is_generated_on_failure(monkeypatch):
     assert "consulta_recuperacion" in resultados
     assert resultados["consulta_recuperacion"] is not None
     assert "20231026" in resultados["consulta_recuperacion"]["fechas"]
+
+def test_simulator_report_has_correct_sources_structure(monkeypatch):
+    """
+    Verifica que el reporte final del simulador tiene la estructura correcta
+    de 'fuentes' (lustre y s3), que implementamos anteriormente.
+    """
+    TEST_ID = "TEST_SOURCES_STRUCTURE"
+    monkeypatch.setattr("main.generar_id_consulta", lambda: TEST_ID)
+
+    # 1. Crear la consulta usando una solicitud válida
+    create_response = client.post("/query", json=VALID_REQUEST)
+    assert create_response.status_code == 200
+
+    # 2. Esperar a que el simulador complete el trabajo
+    for _ in range(10):
+        get_response = client.get(f"/query/{TEST_ID}")
+        if get_response.json()["estado"] == "completado":
+            break
+        time.sleep(1)
+    else:
+        pytest.fail("La consulta del simulador no se completó a tiempo.")
+
+    # 3. Obtener los resultados y verificar la estructura del reporte
+    results_response = client.get(f"/query/{TEST_ID}?resultados=True")
+    assert results_response.status_code == 200
+    resultados = results_response.json()["resultados"]
+    
+    assert "fuentes" in resultados
+    fuentes = resultados["fuentes"]
+    
+    assert "lustre" in fuentes
+    assert "s3" in fuentes
+    
+    for source_name in ["lustre", "s3"]:
+        assert "archivos" in fuentes[source_name]
+        assert "total" in fuentes[source_name]
+        assert isinstance(fuentes[source_name]["archivos"], list)
+        assert isinstance(fuentes[source_name]["total"], int)
+
+    assert "total_archivos" in resultados
+    assert resultados["total_archivos"] == fuentes["lustre"]["total"] + fuentes["s3"]["total"]
+
+def test_complex_query_does_not_get_stuck(monkeypatch):
+    """
+    Verifica que una consulta compleja con muchas fechas y rangos no se queda
+    atorada en el procesamiento y se completa correctamente.
+    """
+    TEST_ID = "TEST_COMPLEX_QUERY"
+    monkeypatch.setattr("main.generar_id_consulta", lambda: TEST_ID)
+
+    # Una solicitud compleja similar a la que causó problemas
+    complex_request = {
+        "nivel": "L2",
+        "dominio": "conus",
+        "productos": ["CMIP", "ACTP"],
+        "fechas": {
+            "20200101": ["19:19-22:19"],
+            "20200212": ["17:51-20:51", "19:31-22:31"],
+            "20201002": ["19:11-22:11"],
+            "20201006": ["06:46-09:46"]
+        },
+        "creado_por": "test@lanot.unam.mx"
+    }
+
+    # 1. Crear la consulta
+    create_response = client.post("/query", json=complex_request)
+    assert create_response.status_code == 200
+
+    # 2. Monitorear hasta que se complete, con un timeout generoso
+    # Si el proceso se atora, este bucle fallará por timeout.
+    timeout = 20  # segundos
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        get_response = client.get(f"/query/{TEST_ID}")
+        assert get_response.status_code == 200
+        get_data = get_response.json()
+        if get_data["estado"] == "completado":
+            break
+        time.sleep(1)
+    else:
+        pytest.fail(f"La consulta compleja no se completó en {timeout} segundos. Posiblemente se atoró.")
+
+    # 3. Verificar que el estado final es 'completado'
+    assert get_data["estado"] == "completado"

@@ -1,16 +1,29 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Body
 from database import ConsultasDatabase, DATABASE_PATH
 from background_simulator import BackgroundSimulator
+from recover import RecoverFiles # Importar el procesador real
 from processors import HistoricQueryProcessor
 from schemas import HistoricQueryRequest
 from datetime import datetime
 from typing import Dict, Any
+import logging
 from pydantic import ValidationError
 from config import SatelliteConfigGOES
 import uvicorn
+import os # Importar os para leer variables de entorno
 import secrets
 import string
 
+# --- Configuración de Logging ---
+# Configura el logging para escribir en un archivo en un entorno de producción.
+# En un entorno real, podrías usar una configuración más avanzada (ej. JSON, rotación de archivos).
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler() # Escribe a la consola. Reemplazar con logging.FileHandler("app.log") para producción.
+    ]
+)
 app = FastAPI(
     title="LANOT Historic Request",
     description="API para solicitudes de datos históricos del LANOT",
@@ -23,10 +36,22 @@ AVAILABLE_SATELLITE_CONFIGS = {
     "GOES": SatelliteConfigGOES(),
 }
 
+# --- Configuración y Componentes Dinámicos ---
+
+# Usar variables de entorno para configurar rutas clave
+DB_PATH = os.getenv("HISTORIC_DB_PATH", DATABASE_PATH)
+SOURCE_DATA_PATH = os.getenv("HISTORIC_SOURCE_PATH", "/depot/goes16")
+DOWNLOAD_PATH = os.getenv("HISTORIC_DOWNLOAD_PATH", "/data/tmp")
+
+# Selección del procesador de background mediante variable de entorno
+PROCESSOR_MODE = os.getenv("PROCESSOR_MODE", "real") # 'real' o 'simulador'
+
 # Inicializar componentes
-db = ConsultasDatabase(db_path=DATABASE_PATH)
+db = ConsultasDatabase(db_path=DB_PATH)
 processor = HistoricQueryProcessor()
-recover = BackgroundSimulator(db)
+
+# Instanciar el procesador de background según el modo
+recover = RecoverFiles(db, source_data_path=SOURCE_DATA_PATH, base_download_path=DOWNLOAD_PATH, max_workers=int(os.getenv("HISTORIC_MAX_WORKERS", "8"))) if PROCESSOR_MODE == "real" else BackgroundSimulator(db)
 
 
 def generar_id_consulta() -> str:
@@ -37,6 +62,32 @@ def generar_id_consulta() -> str:
 async def health_check():
     """Health check"""
     return {"status": "active", "timestamp": datetime.now().isoformat()}
+
+@app.get("/health")
+async def health_check_detailed():
+    """
+    Verifica la salud de la aplicación y sus dependencias clave.
+    """
+    db_status = "ok"
+    storage_status = "ok"
+    overall_status = "ok"
+    
+    # 1. Verificar la conexión a la base de datos
+    try:
+        db.listar_consultas(limite=1) # Intenta una operación simple
+    except Exception as e:
+        db_status = f"error: {e}"
+        overall_status = "error"
+
+    # 2. Verificar que el almacenamiento primario (Lustre) esté accesible
+    if not os.path.exists(SOURCE_DATA_PATH):
+        storage_status = f"error: La ruta de origen '{SOURCE_DATA_PATH}' no existe o no es accesible."
+        overall_status = "error"
+
+    status_code = 200 if overall_status == "ok" else 503 # Service Unavailable
+    
+    return {"status": overall_status, "database": db_status, "storage": storage_status}
+
 
 def _validate_and_prepare_request(request_data: Dict[str, Any]) -> (Dict[str, Any], Any):
     """

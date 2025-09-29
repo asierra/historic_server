@@ -4,8 +4,6 @@ import time
 import sys
 from typing import Dict
 
-# --- Configuración ---
-BASE_URL = "http://localhost:8000"
 POLL_INTERVAL = 2  # Segundos entre cada sondeo de estado
 TIMEOUT = 60       # Segundos máximos para esperar que una consulta se complete
 
@@ -22,10 +20,11 @@ def print_response(response: requests.Response):
     except json.JSONDecodeError:
         print(f"-> Respuesta (No-JSON): {response.text}")
 
-def main(json_file_path: str):
+def main(base_url: str, json_file_path: str):
     """
     Función principal que envía una solicitud desde un archivo JSON y monitorea el resultado.
     """
+    print(f"🎯 Apuntando al servidor en: {base_url}")
     # --- 1. Cargar la solicitud desde el archivo JSON ---
     print_separator(f"Cargando solicitud desde {json_file_path}")
     try:
@@ -43,18 +42,18 @@ def main(json_file_path: str):
     # --- 2. Validar la solicitud ---
     print_separator("Paso 1: Validando la solicitud")
     try:
-        response = requests.post(f"{BASE_URL}/validate", json=request_data)
+        response = requests.post(f"{base_url}/validate", json=request_data)
         print_response(response)
         if response.status_code != 200:
             print("\n❌ La validación falló. Abortando.")
             return
     except requests.ConnectionError as e:
-        print(f"❌ Error de conexión: No se pudo conectar a {BASE_URL}. ¿Está el servidor corriendo?")
+        print(f"❌ Error de conexión: No se pudo conectar a {base_url}. ¿Está el servidor corriendo?")
         return
 
     # --- 3. Crear la consulta ---
     print_separator("Paso 2: Creando la consulta")
-    response = requests.post(f"{BASE_URL}/query", json=request_data)
+    response = requests.post(f"{base_url}/query", json=request_data)
     print_response(response)
     if response.status_code != 200:
         print("\n❌ La creación de la consulta falló. Abortando.")
@@ -70,7 +69,7 @@ def main(json_file_path: str):
     start_time = time.time()
     final_status = None
     while time.time() - start_time < TIMEOUT:
-        response = requests.get(f"{BASE_URL}/query/{consulta_id}")
+        response = requests.get(f"{base_url}/query/{consulta_id}")
         if response.status_code == 200:
             data = response.json()
             estado = data.get("estado")
@@ -93,16 +92,18 @@ def main(json_file_path: str):
     # --- 5. Obtener los resultados finales ---
     if final_status == "completado":
         print_separator("Paso 4: Obteniendo resultados finales")
-        response = requests.get(f"{BASE_URL}/query/{consulta_id}?resultados=True")
+        response = requests.get(f"{base_url}/query/{consulta_id}?resultados=True")
         print_response(response)
     else:
         print_separator("Consulta finalizada con error")
         print("No se pueden obtener resultados.")
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Uso: python api_client.py <ruta_al_archivo.json>")
+    if len(sys.argv) != 3:
+        print("Uso: python api_client.py <url_base> <ruta_al_archivo.json>")
+        print("Ejemplo: python api_client.py http://localhost:8000 ./solicitud.json")
         sys.exit(1)
     
-    json_file = sys.argv[1]
-    main(json_file)
+    base_url_arg = sys.argv[1]
+    json_file_arg = sys.argv[2]
+    main(base_url_arg, json_file_arg)

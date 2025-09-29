@@ -1,5 +1,6 @@
 import time
 import logging
+import os
 import random
 from datetime import datetime, timedelta
 from typing import Dict
@@ -15,6 +16,11 @@ class BackgroundSimulator():
     def __init__(self, db: ConsultasDatabase):
         self.db = db
         self.nombre = "simulador"
+        # Hacer las probabilidades de éxito configurables
+        self.local_success_rate = float(os.getenv("SIM_LOCAL_SUCCESS_RATE", "0.8"))
+        self.s3_success_rate = float(os.getenv("SIM_S3_SUCCESS_RATE", "0.5"))
+        logging.info(f"📈 Simulador inicializado con tasa de éxito local: {self.local_success_rate*100}% y S3: {self.s3_success_rate*100}%")
+
         self.etapas_simuladas = {
             "rapido": [
                 (10, "Validando parámetros...", 1),
@@ -131,18 +137,19 @@ class BackgroundSimulator():
                         })
                     current_dt += timedelta(minutes=1)
 
-        # 2. Simular recuperación local y S3 con fallos aleatorios
-        archivos_recuperados = []
+        # 2. Simular recuperación de Lustre, S3 y fallos
+        lustre_recuperados = []
+        s3_recuperados = []
         objetivos_fallidos_final = []
 
         for objetivo in objetivos:
             # Simular recuperación local (80% de éxito)
-            if random.random() < 0.8:
-                archivos_recuperados.append(objetivo["nombre_archivo"])
+            if random.random() < self.local_success_rate:
+                lustre_recuperados.append(objetivo["nombre_archivo"])
             else:
                 # Simular recuperación S3 (50% de éxito para los que fallaron localmente)
-                if random.random() < 0.5:
-                    archivos_recuperados.append(objetivo["nombre_archivo"])
+                if random.random() < self.s3_success_rate:
+                    s3_recuperados.append(objetivo["nombre_archivo"])
                 else:
                     # Fallo definitivo
                     objetivos_fallidos_final.append(objetivo)
@@ -177,25 +184,34 @@ class BackgroundSimulator():
                               (nivel == 'L2' and not productos_solicitados)
 
         if not copiar_tgz_completo:
-            # Si no se copia el tgz, simulamos nombres de archivos .nc
-            archivos_finales = []
-            for tgz_name in archivos_recuperados:
-                timestamp_part = tgz_name.split('_', 4)[-1].split('.')[0]
-                if nivel == 'L1b':
-                    for banda in bandas_solicitadas:
-                        archivos_finales.append(f"OR_{sensor.upper()}-{nivel}-RadF-M6C{banda}_{sat_code}_{timestamp_part}_e..._c....nc")
-                elif nivel == 'L2':
-                    for producto in productos_solicitados:
-                        archivos_finales.append(f"OR_{sensor.upper()}-{nivel}-{producto}F-M6_{sat_code}_{timestamp_part}_e..._c....nc")
-            archivos_recuperados = archivos_finales
+            # Función auxiliar para expandir nombres de .tgz a .nc
+            def expandir_nombres(lista_tgz):
+                archivos_nc = []
+                for tgz_name in lista_tgz:
+                    timestamp_part = tgz_name.split('_', 4)[-1].split('.')[0]
+                    if nivel == 'L1b':
+                        for banda in bandas_solicitadas:
+                            archivos_nc.append(f"OR_{sensor.upper()}-{nivel}-RadF-M6C{banda}_{sat_code}_{timestamp_part}_e..._c....nc")
+                    elif nivel == 'L2':
+                        for producto in productos_solicitados:
+                            archivos_nc.append(f"OR_{sensor.upper()}-{nivel}-{producto}F-M6_{sat_code}_{timestamp_part}_e..._c....nc")
+                return archivos_nc
+            
+            # Aplicar la expansión a ambas listas
+            lustre_recuperados = expandir_nombres(lustre_recuperados)
+            s3_recuperados = expandir_nombres(s3_recuperados)
 
-        # 5. Calcular tamaño y generar el reporte final
+        # 5. Calcular tamaño y generar el reporte final (imitando la nueva estructura)
+        todos_los_archivos = lustre_recuperados + s3_recuperados
         tamaño_por_archivo = random.uniform(100.0, 500.0) if copiar_tgz_completo else random.uniform(20.0, 150.0)
-        tamaño_mb = len(archivos_recuperados) * tamaño_por_archivo
+        tamaño_mb = len(todos_los_archivos) * tamaño_por_archivo
 
         return {
-            "archivos_recuperados": archivos_recuperados,
-            "total_archivos": len(archivos_recuperados),
+            "fuentes": {
+                "lustre": {"archivos": lustre_recuperados, "total": len(lustre_recuperados)},
+                "s3": {"archivos": s3_recuperados, "total": len(s3_recuperados)}
+            },
+            "total_archivos": len(todos_los_archivos),
             "tamaño_total_mb": round(tamaño_mb, 2),
             "directorio_destino": f"/data/tmp/{consulta_id}",
             "timestamp_procesamiento": datetime.now().isoformat(),
