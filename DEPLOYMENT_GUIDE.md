@@ -112,7 +112,7 @@ export HISTORIC_MAX_WORKERS="16" # Ajusta según los cores de tu CPU
 # El flag '-w' indica el número de procesos "worker". Una buena regla es (2 * N_CORES) + 1.
 # El flag '-k' especifica la clase de worker de Uvicorn.
 # El flag '--bind' indica en qué dirección IP y puerto escuchar.
-gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:8000
+gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 127.0.0.1:8000
 ```
 
 **Nota:** Asegúrate de que los directorios para la base de datos (`/var/data/historic_api`) y las descargas existan y tengan los permisos correctos.

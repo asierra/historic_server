@@ -51,7 +51,15 @@ db = ConsultasDatabase(db_path=DB_PATH)
 processor = HistoricQueryProcessor()
 
 # Instanciar el procesador de background según el modo
-recover = RecoverFiles(db, source_data_path=SOURCE_DATA_PATH, base_download_path=DOWNLOAD_PATH, max_workers=int(os.getenv("HISTORIC_MAX_WORKERS", "8"))) if PROCESSOR_MODE == "real" else BackgroundSimulator(db)
+if PROCESSOR_MODE == "real":
+    recover = RecoverFiles(
+        db=db,
+        source_data_path=SOURCE_DATA_PATH,
+        base_download_path=DOWNLOAD_PATH,
+        max_workers=int(os.getenv("HISTORIC_MAX_WORKERS", "8"))
+    )
+else:
+    recover = BackgroundSimulator(db)
 
 
 def generar_id_consulta() -> str:
