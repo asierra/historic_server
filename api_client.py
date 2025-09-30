@@ -1,11 +1,8 @@
 import requests
 import json
 import time
-import sys
+import argparse
 from typing import Dict
-
-POLL_INTERVAL = 2  # Segundos entre cada sondeo de estado
-TIMEOUT = 60       # Segundos máximos para esperar que una consulta se complete
 
 def print_separator(title: str):
     """Imprime un separador visual para la salida."""
@@ -20,7 +17,7 @@ def print_response(response: requests.Response):
     except json.JSONDecodeError:
         print(f"-> Respuesta (No-JSON): {response.text}")
 
-def main(base_url: str, json_file_path: str):
+def main(base_url: str, json_file_path: str, timeout: int, poll_interval: int):
     """
     Función principal que envía una solicitud desde un archivo JSON y monitorea el resultado.
     """
@@ -68,7 +65,7 @@ def main(base_url: str, json_file_path: str):
     print_separator(f"Paso 3: Monitoreando la consulta '{consulta_id}'")
     start_time = time.time()
     final_status = None
-    while time.time() - start_time < TIMEOUT:
+    while time.time() - start_time < timeout:
         response = requests.get(f"{base_url}/query/{consulta_id}")
         if response.status_code == 200:
             data = response.json()
@@ -83,7 +80,7 @@ def main(base_url: str, json_file_path: str):
         else:
             print(f"-> Error al obtener estado: {response.status_code}")
         
-        time.sleep(POLL_INTERVAL)
+        time.sleep(poll_interval)
 
     if not final_status:
         print("\n⏰ Timeout esperando la finalización de la consulta.")
@@ -99,11 +96,12 @@ def main(base_url: str, json_file_path: str):
         print("No se pueden obtener resultados.")
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Uso: python api_client.py <url_base> <ruta_al_archivo.json>")
-        print("Ejemplo: python api_client.py http://localhost:8000 ./solicitud.json")
-        sys.exit(1)
-    
-    base_url_arg = sys.argv[1]
-    json_file_arg = sys.argv[2]
-    main(base_url_arg, json_file_arg)
+    parser = argparse.ArgumentParser(description="Cliente para la API de solicitudes históricas.")
+    parser.add_argument("base_url", help="URL base de la API (ej. http://localhost:8000)")
+    parser.add_argument("json_file", help="Ruta al archivo JSON de la solicitud.")
+    parser.add_argument("--timeout", type=int, default=600, help="Tiempo máximo de espera en segundos para la consulta.")
+    parser.add_argument("--poll-interval", type=int, default=10, help="Intervalo en segundos entre cada sondeo de estado.")
+
+    args = parser.parse_args()
+
+    main(args.base_url, args.json_file, args.timeout, args.poll_interval)

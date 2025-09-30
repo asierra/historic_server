@@ -191,30 +191,29 @@ class RecoverFiles:
                 fin_dt = fecha_dt.replace(hour=int(fin_str[:2]), minute=int(fin_str[3:])) # Se re-añade este bloque
                 current_dt = inicio_dt # Se re-añade este bloque
                 while current_dt <= fin_dt:
-                    if (dominio == 'conus' and current_dt.minute % 5 == 1) or \
-                       (dominio == 'fd' and current_dt.minute % 10 == 0):
-                        
-                        # Determinar el código de satélite correcto para esta fecha específica
-                        sat_code = self._get_sat_code_for_date(satelite, current_dt)
+                    # Se elimina la condición restrictiva de minutos.
+                    # Se generará un objetivo para cada minuto en el rango y se dejará
+                    # que el sistema de archivos determine si existe.
+                    
+                    # Determinar el código de satélite correcto para esta fecha específica
+                    sat_code = self._get_sat_code_for_date(satelite, current_dt)
 
-                        # Construir el timestamp sin segundos (YYYYJJJHHMM)
-                        timestamp_archivo = f"s{current_dt.strftime('%Y%j%H%M')}"
-                        # Construir el patrón de búsqueda sin el prefijo 'OR_'
-                        # y añadiendo el modo de escaneo (ej. RadF-M6) para L1b.
-                        if nivel == 'L1b' and sensor == 'abi':
-                            # Para ABI L1b, el modo de escaneo es parte del nombre.
-                            patron_busqueda = f"{sensor.upper()}-{nivel}-RadF-M6_{sat_code}-{timestamp_archivo}.tgz"
-                        else:
-                            patron_busqueda = f"{sensor.upper()}-{nivel}-*-{sat_code}-{timestamp_archivo}.tgz"
+                    # Construir el timestamp sin segundos (YYYYJJJHHMM)
+                    timestamp_archivo = f"s{current_dt.strftime('%Y%j%H%M')}"
+                    # Construir el patrón de búsqueda
+                    if nivel == 'L1b' and sensor == 'abi':
+                        patron_busqueda = f"{sensor.upper()}-{nivel}-RadF-M6_{sat_code}-{timestamp_archivo}.tgz"
+                    else:
+                        patron_busqueda = f"{sensor.upper()}-{nivel}-*-{sat_code}-{timestamp_archivo}.tgz"
 
-                        # La fecha original para la reconstrucción de fallos es la clave YYYYJJJ del bucle actual.
-                        # El horario original es el rango o valor que estamos iterando.
-                        objetivos.append(self.ObjetivoBusqueda(
-                            directorio_semana=directorio_semana,
-                            patron_busqueda=patron_busqueda,
-                            fecha_original=fecha_jjj, # Usamos la fecha juliana
-                            horario_original=horario_str
-                        ))
+                    # La fecha original para la reconstrucción de fallos es la clave YYYYJJJ del bucle actual.
+                    # El horario original es el rango o valor que estamos iterando.
+                    objetivos.append(self.ObjetivoBusqueda(
+                        directorio_semana=directorio_semana,
+                        patron_busqueda=patron_busqueda,
+                        fecha_original=fecha_jjj, # Usamos la fecha juliana
+                        horario_original=horario_str
+                    ))
                     current_dt += timedelta(minutes=1)
         return objetivos
     def _buscar_archivo_para_objetivo(self, objetivo: ObjetivoBusqueda) -> Optional[Path]:
