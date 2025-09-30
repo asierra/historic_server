@@ -98,7 +98,7 @@ class RecoverFiles:
             self.db.actualizar_estado(consulta_id, "procesando", 10, "Preparando entorno")
 
             # 2. Descubrir y filtrar archivos que coinciden con la consulta
-            archivos_a_procesar_local = self._discover_and_filter_files(query_dict)
+            archivos_a_procesar_local, inaccessible_files_local = self._discover_and_filter_files(query_dict)
             self.logger.info(f"🔎 Se encontraron {len(archivos_a_procesar_local)} archivos potenciales en el almacenamiento local.")
 
             if archivos_a_procesar_local:
@@ -121,7 +121,7 @@ class RecoverFiles:
             if archivos_pendientes_local:
                 # Ya no usamos 'with', usamos el executor global
                 future_to_objetivo = {
-                    self.executor.submit(self._recuperar_archivo, consulta_id, 20 + int(((i + 1) / total_pendientes) * 60), archivo_a_procesar, directorio_destino, query_dict): archivo_a_procesar
+                    self.executor.submit(self._process_single_file_wrapper, consulta_id, 20 + int(((i + 1) / total_pendientes) * 60), archivo_a_procesar, directorio_destino, query_dict): archivo_a_procesar
                     for i, archivo_a_procesar in enumerate(archivos_pendientes_local)
                 }
 
@@ -167,6 +167,23 @@ class RecoverFiles:
             self.logger.error(f"❌ Error procesando consulta {consulta_id}: {e}")
             self.db.actualizar_estado(consulta_id, "error", 0, f"Error: {str(e)}")
     
+    def _process_single_file_wrapper(self, consulta_id: str, progreso: int, archivo_fuente: Path, directorio_destino: Path, query_dict: Dict):
+        """
+        Wrapper que primero verifica la accesibilidad y luego procesa el archivo.
+        Esta es la función que se ejecuta en el ThreadPoolExecutor.
+        """
+        try:
+            # 1. Verificación de accesibilidad (Pre-flight Check)
+            # stat() es una llamada de bajo nivel que puede colgarse en un FS de red.
+            # El timeout en el bucle principal de procesar_consulta capturará si esto se cuelga.
+            archivo_fuente.stat()
+        except OSError as e:
+            self.logger.warning(f"⚠️ Archivo inaccesible en Lustre, se omitirá: {archivo_fuente.name}. Error: {e}")
+            raise  # Relanzar para que el bucle principal lo marque como fallo.
+
+        # 2. Si es accesible, proceder con la recuperación.
+        return self._recuperar_archivo(consulta_id, progreso, archivo_fuente, directorio_destino, query_dict)
+
     def _discover_and_filter_files(self, query_dict: Dict) -> (List[Path], List[Path]):
         """
         Descubre todos los archivos en los directorios relevantes y los filtra
@@ -231,20 +248,7 @@ class RecoverFiles:
                         # Ignorar archivos con nombres mal formados
                         continue
         
-        # --- Verificación de Accesibilidad (Pre-flight Check) ---
-        accessible_files = []
-        inaccessible_files = []
-        if archivos_encontrados:
-            self.logger.info(f"Verificando accesibilidad de {len(archivos_encontrados)} archivos encontrados...")
-            for archivo in archivos_encontrados:
-                try:
-                    # stat() es una llamada ligera que fallará si el archivo tiene problemas de acceso en el FS.
-                    archivo.stat()
-                    accessible_files.append(archivo)
-                except OSError as e:
-                    self.logger.warning(f"⚠️ Archivo inaccesible en Lustre, se omitirá: {archivo.name}. Error: {e}")
-                    inaccessible_files.append(archivo)
-        return accessible_files, inaccessible_files
+        return archivos_encontrados, [] # Devolvemos la lista completa, la verificación se hace en el worker.
 
     def _get_sat_code_for_date(self, satellite_name: str, request_date: datetime) -> str:
         """
