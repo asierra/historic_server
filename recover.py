@@ -236,12 +236,19 @@ class RecoverFiles:
                     # Como fallback, si el dominio no es ninguno de estos, se asume cada 10 min.
                     
                     should_generate = False
-                    if dominio == 'fd':
+                    # Para productos L2, el intervalo de minutos en el nombre del archivo puede diferir del intervalo de escaneo nominal.
+                    # Basado en los logs de S3 para ACTPF, parece que son intervalos de 10 minutos para el timestamp 's'.
+                    # Esto debería ser configurable o derivado de forma más inteligente.
+                    if nivel == 'L2' and query_dict.get('productos') and 'ACTP' in query_dict['productos']:
+                        # Regla específica para L2 ACTP: asumir intervalos de 10 minutos en el nombre del archivo
                         should_generate = (current_dt.minute % 10 == 0)
-                    elif dominio == 'conus':
-                        should_generate = (current_dt.minute % 5 == 1)
-                    else: # Fallback para dominios no especificados o diferentes
-                        should_generate = (current_dt.minute % 10 == 0)
+                    else: # Lógica por defecto basada en el dominio para otros niveles/productos
+                        if dominio == 'fd':
+                            should_generate = (current_dt.minute % 10 == 0)
+                        elif dominio == 'conus':
+                            should_generate = (current_dt.minute % 5 == 1)
+                        else: # Fallback para dominios no especificados o diferentes
+                            should_generate = (current_dt.minute % 10 == 0)
 
                     if should_generate:
                         # Determinar el código de satélite correcto para esta fecha específica
@@ -466,7 +473,7 @@ class RecoverFiles:
                 # Extraer año, día juliano y hora del patrón de búsqueda
                 # El patrón es como OR_ABI-L1b-RadF-M6_G16_s202412312000
                 timestamp_str = objetivo.patron_busqueda.split('_s')[1].split('.')[0]
-                dt_obj = datetime.strptime(timestamp_str, "%Y%j%H%M%S")
+                dt_obj = datetime.strptime(timestamp_str, "%Y%j%H%M")
                 
                 anio = dt_obj.strftime("%Y")
                 dia_juliano = dt_obj.strftime("%j")
@@ -480,9 +487,21 @@ class RecoverFiles:
                 # Buscar el archivo que coincida con nuestro timestamp
                 archivo_s3_a_descargar = None
                 for s3_file in archivos_en_s3:
-                    if f"_s{timestamp_str}" in s3_file:
-                        archivo_s3_a_descargar = s3_file
-                        break
+                    # Extraer la parte del timestamp 's' del nombre del archivo S3
+                    # Ejemplo s3_file: OR_ABI-L2-ACTPF-M6_G16_s20202800930188_e...
+                    s_part_start_idx = s3_file.find('_s')
+                    if s_part_start_idx != -1:
+                        # La parte del timestamp termina antes del siguiente guion bajo o la extensión del archivo
+                        s_part_end_idx = s3_file.find('_e', s_part_start_idx)
+                        if s_part_end_idx == -1: # Fallback si _e no se encuentra
+                            s_part_end_idx = s3_file.find('.nc', s_part_start_idx) # Buscar .nc
+                        
+                        if s_part_end_idx != -1:
+                            s3_timestamp_full = s3_file[s_part_start_idx + 2 : s_part_end_idx] # ej., "20202800930188"
+                            # Verificar si nuestro timestamp generado (YYYYJJJHHMM) es un prefijo del timestamp de S3
+                            if s3_timestamp_full.startswith(timestamp_str):
+                                archivo_s3_a_descargar = s3_file
+                                break
                 
                 if not archivo_s3_a_descargar:
                     self.logger.warning(f"❌ No se encontró el archivo en S3 para el objetivo: {objetivo.patron_busqueda}")

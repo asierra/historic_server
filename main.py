@@ -150,7 +150,15 @@ def _validate_and_prepare_request(request_data: Dict[str, Any]) -> (Dict[str, An
     data['sat'] = sat_name
     data['sensor'] = request.sensor or config.DEFAULT_SENSOR
     data['nivel'] = request.nivel or config.DEFAULT_LEVEL
+
+    # Lógica condicional para las bandas:
+    # Por defecto, las bandas se toman de la solicitud o se usa el valor por defecto.
     data['bandas'] = request.bandas or config.DEFAULT_BANDAS
+    # Excepción: Si es L2 y se piden productos, las bandas NO son relevantes,
+    # a menos que uno de los productos sea 'CMIP', que sí usa bandas.
+    if data['nivel'] == 'L2' and request.productos:
+        if 'CMIP' not in request.productos:
+            data['bandas'] = None
 
     if not config.is_valid_satellite(data['sat']):
         raise ValueError(f"Satélite debe ser uno de: {config.VALID_SATELLITES}")
