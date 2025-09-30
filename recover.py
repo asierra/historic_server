@@ -99,13 +99,16 @@ class RecoverFiles:
             archivos_a_procesar_local = self._discover_and_filter_files(query_dict)
             self.logger.info(f"🔎 Se encontraron {len(archivos_a_procesar_local)} archivos potenciales en el almacenamiento local.")
 
-            # 3. Escanear el directorio de destino para no reprocesar archivos
-            archivos_pendientes_local = self._scan_existing_files(archivos_a_procesar_local, directorio_destino)
+            if archivos_a_procesar_local:
+                # 3. Si se encontraron archivos, escanear el destino para no reprocesar.
+                archivos_pendientes_local = self._scan_existing_files(archivos_a_procesar_local, directorio_destino)
+                if not archivos_pendientes_local:
+                    self.logger.info("👍 No hay archivos locales pendientes, todos los encontrados ya fueron recuperados.")
+            else:
+                # Si no se encontraron archivos locales, no hay nada que procesar localmente.
+                archivos_pendientes_local = []
+
             total_pendientes = len(archivos_pendientes_local)
-            
-            if not archivos_pendientes_local:
-                self.logger.info("👍 No hay objetivos pendientes, todos los archivos ya fueron recuperados.")
-            
             self.db.actualizar_estado(consulta_id, "procesando", 20, f"Identificados {total_pendientes} archivos pendientes de procesar.")
 
             objetivos_fallidos_local = []
@@ -179,7 +182,9 @@ class RecoverFiles:
 
             # Listar todos los archivos .tgz en el directorio de la hora
             # Esto es más eficiente que iterar minuto a minuto
-            archivos_candidatos = list(directorio_semana.glob(f"*-s{año}{dia_del_año_int:03d}*.tgz"))
+            # Hacemos el glob más genérico para que coincida con cualquier prefijo (OR_, CG_, ABI-, etc.)
+            # y cualquier cosa entre el prefijo y el timestamp.
+            archivos_candidatos = list(directorio_semana.glob(f"*{año}{dia_del_año_int:03d}*.tgz"))
 
             for horario_str in horarios_list:
                 partes = horario_str.split('-')
