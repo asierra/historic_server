@@ -1,8 +1,7 @@
 fastapi
-uvicorn
-pydantic
-fastjsonschema
-python-multipart
-pytest
-httpx
+uvicorn[standard]
+gunicorn
+pebble
 s3fs
+pytest
+requests
