@@ -61,13 +61,25 @@ class RecoverFiles:
 
         self.logger.info(f"🔍 Escaneando {destino} en busca de archivos ya recuperados...")
         
-        # Crear un set de los nombres de archivo ya existentes para una búsqueda rápida.
-        # Esto funciona tanto para .tgz como para .nc extraídos.
-        archivos_existentes = {f.name for f in destino.iterdir()}
+        # Crear un set de todos los timestamps de los archivos ya existentes en el destino.
+        timestamps_existentes = set()
+        for f in destino.iterdir():
+            if f.is_file():
+                s_part_start_idx = f.name.find('_s')
+                if s_part_start_idx != -1:
+                    # Extraer YYYYJJJHHMM (11 dígitos)
+                    timestamp_part = f.name[s_part_start_idx + 2 : s_part_start_idx + 13]
+                    timestamps_existentes.add(timestamp_part)
         
         archivos_pendientes = []
         for archivo_fuente in archivos_a_procesar:
-            if archivo_fuente.name not in archivos_existentes:
+            s_part_start_idx = archivo_fuente.name.find('_s')
+            if s_part_start_idx != -1:
+                timestamp_fuente = archivo_fuente.name[s_part_start_idx + 2 : s_part_start_idx + 13]
+                if timestamp_fuente not in timestamps_existentes:
+                    archivos_pendientes.append(archivo_fuente)
+            else:
+                # Si el archivo fuente no tiene un timestamp, lo procesamos por si acaso.
                 archivos_pendientes.append(archivo_fuente)
 
         num_recuperados = len(archivos_a_procesar) - len(archivos_pendientes)
@@ -148,9 +160,13 @@ class RecoverFiles:
         archivos_encontrados = []
         
         base_path = self.source_data_path
-        for key in ['sensor', 'nivel', 'dominio']:
-            if query_dict.get(key):
-                base_path /= query_dict[key].lower()
+        base_path /= query_dict.get('sensor', 'abi').lower()
+        base_path /= query_dict.get('nivel', 'l1b').lower()
+
+        # Para L2, el dominio puede no ser parte de la ruta si se especifican productos.
+        # Esta lógica asume que los productos L2 no están en subdirectorios de dominio.
+        if query_dict.get('dominio') and not query_dict.get('productos'):
+             base_path /= query_dict['dominio'].lower()
 
         for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
             año = fecha_jjj[:4]
