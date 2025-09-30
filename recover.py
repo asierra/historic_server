@@ -243,8 +243,9 @@ class RecoverFiles:
                     # Para productos L2, el intervalo de minutos en el nombre del archivo puede diferir del intervalo de escaneo nominal.
                     # Basado en los logs de S3 para ACTPF, parece que son intervalos de 10 minutos para el timestamp 's'.
                     # Esto debería ser configurable o derivado de forma más inteligente.
-                    if nivel == 'L2' and query_dict.get('productos') and 'ACTP' in query_dict['productos']:
-                        # Regla específica para L2 ACTP: asumir intervalos de 10 minutos en el nombre del archivo
+                    productos_l2_10min = ['ACTP', 'CMIP']
+                    if nivel == 'L2' and query_dict.get('productos') and any(p in query_dict['productos'] for p in productos_l2_10min):
+                        # Regla específica para ciertos productos L2: asumir intervalos de 10 minutos en el nombre del archivo
                         should_generate = (current_dt.minute % 10 == 0)
                     else: # Lógica por defecto basada en el dominio para otros niveles/productos
                         if dominio == 'fd':
@@ -439,23 +440,28 @@ class RecoverFiles:
         # Construir el nombre del producto para la ruta S3
         sensor = query_dict.get('sensor', 'abi').upper()
         nivel = query_dict.get('nivel', 'L1b')
-        # Manejar de forma segura el caso en que 'productos' no existe en la consulta
         productos_solicitados = query_dict.get('productos')
-        producto_principal = productos_solicitados[0] if productos_solicitados else None
-        
-        if nivel == 'L1b':
-            producto_s3 = f"{sensor}-{nivel}-RadF"
-        elif nivel == 'L2' and producto_principal:
-            producto_s3 = f"{sensor}-{nivel}-{producto_principal}F" # Asume dominio 'F' por defecto para S3
-        else:
-            self.logger.error("No se puede determinar el producto S3 para la consulta.")
-            return [], objetivos_fallidos
 
         if objetivos_fallidos:
-            future_to_objetivo_s3 = {
-                self.executor.submit(self._download_single_s3_objective, consulta_id, objetivo, directorio_destino, s3, producto_s3): objetivo
-                for objetivo in objetivos_fallidos
-            }
+            # Para L2, cada producto puede estar en un directorio S3 diferente.
+            # Para L1b, todos los objetivos usan el mismo producto S3.
+            if nivel == 'L1b':
+                producto_s3 = f"{sensor}-{nivel}-RadF"
+                future_to_objetivo_s3 = {
+                    self.executor.submit(self._download_single_s3_objective, consulta_id, objetivo, directorio_destino, s3, producto_s3): objetivo
+                    for objetivo in objetivos_fallidos
+                }
+            elif nivel == 'L2' and productos_solicitados:
+                future_to_objetivo_s3 = {}
+                for producto in productos_solicitados:
+                    producto_s3 = f"{sensor}-{nivel}-{producto}F"
+                    for objetivo in objetivos_fallidos:
+                        # Evita reenviar el mismo objetivo si ya está en la cola para otro producto
+                        if objetivo not in future_to_objetivo_s3.values():
+                             future_to_objetivo_s3[self.executor.submit(self._download_single_s3_objective, consulta_id, objetivo, directorio_destino, s3, producto_s3)] = objetivo
+            else:
+                self.logger.error("No se puede determinar el producto S3 para la consulta L2 sin productos especificados.")
+                return [], objetivos_fallidos
 
             for future in concurrent.futures.as_completed(future_to_objetivo_s3):
                 objetivo = future_to_objetivo_s3[future]

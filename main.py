@@ -76,11 +76,14 @@ processor = HistoricQueryProcessor()
 # Instanciar el procesador de background según el modo
 if PROCESSOR_MODE == "real":
     # Pasamos el executor compartido al constructor de RecoverFiles
+    S3_FALLBACK_ENABLED = os.getenv("S3_FALLBACK_ENABLED", "true").lower() == "true"
+
     recover = RecoverFiles(
         db=db,
         source_data_path=SOURCE_DATA_PATH,
         base_download_path=DOWNLOAD_PATH,
-        executor=executor
+        executor=executor,
+        s3_fallback_enabled=S3_FALLBACK_ENABLED
     )
 else:
     recover = BackgroundSimulator(db)
