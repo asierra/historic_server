@@ -255,11 +255,11 @@ async def reiniciar_consulta(consulta_id: str, background_tasks: BackgroundTasks
     if not consulta:
         raise HTTPException(status_code=404, detail="Consulta no encontrada.")
 
-    # Solo permitir reiniciar consultas que no estén ya completadas o recién recibidas.
-    if consulta["estado"] not in ["procesando", "error"]:
+    # Permitir reiniciar consultas en proceso, con error, o completadas (para forzar reprocesamiento).
+    if consulta["estado"] not in ["procesando", "error", "completado"]:
         raise HTTPException(
             status_code=400,
-            detail=f"No se puede reiniciar una consulta en estado '{consulta['estado']}'. Solo se permiten 'procesando' o 'error'."
+            detail=f"No se puede reiniciar una consulta en estado '{consulta['estado']}'. Solo se permiten 'procesando', 'error' o 'completado'."
         )
 
     # Volver a encolar la tarea usando la query original guardada en la DB
