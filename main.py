@@ -6,6 +6,7 @@ from processors import HistoricQueryProcessor
 from schemas import HistoricQueryRequest
 from datetime import datetime
 from typing import Dict, Any
+from contextlib import asynccontextmanager
 import logging
 from pydantic import ValidationError
 from config import SatelliteConfigGOES
@@ -25,10 +26,27 @@ logging.basicConfig(
         logging.StreamHandler() # Escribe a la consola. Reemplazar con logging.FileHandler("app.log") para producción.
     ]
 )
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Gestiona el ciclo de vida de la aplicación. El código antes del `yield`
+    se ejecuta al iniciar, y el código después se ejecuta al apagar.
+    """
+    # Código de inicio (si fuera necesario)
+    logging.info("🚀 Servidor iniciando...")
+    yield
+    # Código de apagado
+    logging.info("⏳ Servidor recibiendo señal de apagado...")
+    logging.info("   Esperando a que las tareas de fondo se completen...")
+    executor.shutdown(wait=True)
+    logging.info("✅ Todas las tareas de fondo han finalizado. Servidor apagado.")
+
 app = FastAPI(
     title="LANOT Historic Request",
     description="API para solicitudes de datos históricos del LANOT",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Registro de configuraciones de satélites disponibles
@@ -70,17 +88,6 @@ else:
 
 def generar_id_consulta() -> str:
     return ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
-
-@app.on_event("shutdown")
-def shutdown_event():
-    """
-    Maneja el apagado controlado. Le dice al executor que espere a que las
-    tareas de fondo terminen antes de que el servidor se apague.
-    """
-    logging.info("⏳ Servidor recibiendo señal de apagado...")
-    logging.info("   Esperando a que las tareas de fondo se completen...")
-    executor.shutdown(wait=True)
-    logging.info("✅ Todas las tareas de fondo han finalizado. Servidor apagado.")
 
 @app.get("/")
 async def health_check():

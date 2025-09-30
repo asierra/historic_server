@@ -112,12 +112,12 @@ class RecoverFiles:
             if objetivos_pendientes:
                 # Ya no usamos 'with', usamos el executor global
                 future_to_objetivo = {
-                    self.executor.submit(self._process_single_objective, consulta_id, objetivo, directorio_destino, query_dict, i, total_objetivos_pendientes): (objetivo, i)
-                    for objetivo in objetivos_pendientes # ¡Importante! Solo procesar los pendientes
+                    self.executor.submit(self._process_single_objective, consulta_id, objetivo, directorio_destino, query_dict, idx, total_objetivos_pendientes): (objetivo, idx)
+                    for idx, objetivo in enumerate(objetivos_pendientes) # Usar enumerate para obtener el índice 'idx'
                 }
 
                 for i, future in enumerate(concurrent.futures.as_completed(future_to_objetivo)):
-                    objetivo = future_to_objetivo[future]
+                    objetivo, _ = future_to_objetivo[future] # Desempaquetar la tupla para obtener el objeto objetivo
                     # El progreso se calcula sobre los objetivos pendientes
                     progreso = 20 + int(((i + 1) / total_objetivos_pendientes) * 60)
                     self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Buscando y recuperando archivo {i+1}/{total_objetivos_pendientes}")
@@ -412,14 +412,13 @@ class RecoverFiles:
         """ 
         Intenta descargar desde S3 los archivos que no se encontraron localmente.
         """
+        from botocore.config import Config
         # Configurar timeouts para el cliente S3 para evitar que se quede colgado indefinidamente.
         # connect_timeout: tiempo para establecer la conexión.
         # read_timeout: tiempo de espera para recibir datos una vez conectado.
         s3 = s3fs.S3FileSystem(
             anon=True, 
-            client_kwargs={
-                'config': {'connect_timeout': 10, 'read_timeout': 30}
-            }
+            config_kwargs={'connect_timeout': 10, 'read_timeout': 30}
         )
         archivos_s3_recuperados = []
         objetivos_aun_fallidos = []
@@ -427,7 +426,9 @@ class RecoverFiles:
         # Construir el nombre del producto para la ruta S3
         sensor = query_dict.get('sensor', 'abi').upper()
         nivel = query_dict.get('nivel', 'L1b')
-        producto_principal = query_dict.get('productos', [None])[0]
+        # Manejar de forma segura el caso en que 'productos' no existe en la consulta
+        productos_solicitados = query_dict.get('productos')
+        producto_principal = productos_solicitados[0] if productos_solicitados else None
         
         if nivel == 'L1b':
             producto_s3 = f"{sensor}-{nivel}-RadF"

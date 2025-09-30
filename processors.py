@@ -145,8 +145,12 @@ class HistoricQueryProcessor:
         # Convertir fechas
         fechas = []
         for fecha_str, horarios_str in request_data['fechas'].items():
-            horarios = [parsear_horario(h) for h in horarios_str]
-            fechas.append(Fecha(fecha_str, horarios))
+            try:
+                horarios = [parsear_horario(h) for h in horarios_str]
+                fechas.append(Fecha(fecha_str, horarios))
+            except ValueError:
+                # Captura errores si el formato de fecha (clave) es incorrecto
+                raise ValueError(f"Formato de fecha inválido: '{fecha_str}'. Se esperaba 'YYYYMMDD' o 'YYYYMMDD-YYYYMMDD'.")
         
         # Los datos ya vienen validados y con valores por defecto.
         # La única tarea específica de la configuración aquí es expandir las bandas.

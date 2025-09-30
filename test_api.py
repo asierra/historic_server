@@ -20,9 +20,14 @@ def override_db_for_tests(monkeypatch):
     # 1. Crear una instancia de la DB de prueba
     test_db = ConsultasDatabase(db_path=TEST_DB_PATH)
     
+    # Establecer variables de entorno para el simulador para evitar errores de inicialización
+    monkeypatch.setenv("SIM_LOCAL_SUCCESS_RATE", "0.9")
+    monkeypatch.setenv("SIM_S3_SUCCESS_RATE", "0.8")
+    
     # 2. Reemplazar los objetos globales en main.py
     monkeypatch.setattr(main, "db", test_db)
     monkeypatch.setattr(main, "recover", BackgroundSimulator(test_db))
+    # 3. Desactivar el apagado del executor para evitar errores en las pruebas
     
     try:
         yield  # Aquí es donde se ejecuta la prueba
@@ -272,16 +277,9 @@ def test_simulator_report_has_correct_sources_structure(monkeypatch):
 
 # --- Pruebas de Integración (I/O Real) ---
 
-@pytest.mark.real_io
-def test_s3_fallback_integration(monkeypatch):
-    """
-    Prueba de integración que verifica el fallback a S3.
-    Esta prueba requiere conexión a internet y puede ser lenta.
-    Se ejecuta con `pytest -m real_io`.
-    """
-    TEST_ID = "TEST_S3_FALLBACK"
-
-    # 1. Configurar el entorno para usar el procesador REAL
+@pytest.fixture
+def real_io_fixture(monkeypatch):
+    """Fixture para configurar el entorno para pruebas de I/O real."""
     # Usamos la misma DB de prueba, pero con RecoverFiles
     test_db = main.db # Ya está parcheada por el fixture autouse
     real_recover = RecoverFiles(
@@ -291,25 +289,35 @@ def test_s3_fallback_integration(monkeypatch):
         executor=main.executor
     )
     monkeypatch.setattr(main, "recover", real_recover)
+    yield
+
+@pytest.mark.real_io
+def test_s3_fallback_integration(real_io_fixture, monkeypatch):
+    """
+    Prueba de integración que verifica el fallback a S3.
+    Esta prueba requiere conexión a internet y puede ser lenta.
+    Se ejecuta con `pytest -m real_io`.
+    """
+    TEST_ID = "TEST_S3_FALLBACK"
     monkeypatch.setattr("main.generar_id_consulta", lambda: TEST_ID)
 
-    # 2. Forzar que la búsqueda local siempre falle para activar el fallback a S3
+    # Forzar que la búsqueda local siempre falle para activar el fallback a S3
     monkeypatch.setattr(RecoverFiles, "_buscar_archivo_para_objetivo", lambda self, objetivo: None)
 
-    # 3. Usar una solicitud para un archivo que sabemos que existe en el bucket público de S3
+    # Usar una solicitud para un archivo que sabemos que existe en el bucket público de S3
     # GOES-16, L1b, RadF, 2024, día 001, 00:00 UTC
     s3_request = {
         "sat": "GOES-16",
         "nivel": "L1b",
         "bandas": ["02"], # Solo una banda para que no copie el .tgz
-        "fechas": { "2024001": ["00:00-00:00"] } # Día juliano
+        "fechas": { "20240101": ["00:00"] } # Usar formato YYYYMMDD que el procesador espera
     }
 
-    # 4. Crear la consulta
+    # Crear la consulta
     create_response = client.post("/query", json=s3_request)
     assert create_response.status_code == 200
 
-    # 5. Monitorear hasta que se complete (con un timeout generoso para la descarga)
+    # Monitorear hasta que se complete (con un timeout generoso para la descarga)
     timeout = 60 # segundos
     for _ in range(timeout):
         get_response = client.get(f"/query/{TEST_ID}")
@@ -320,7 +328,7 @@ def test_s3_fallback_integration(monkeypatch):
     else:
         pytest.fail(f"La consulta de S3 no se completó en {timeout} segundos. Mensaje final: {get_data.get('mensaje')}")
 
-    # 6. Verificar los resultados
+    # Verificar los resultados
     results_response = client.get(f"/query/{TEST_ID}?resultados=True")
     assert results_response.status_code == 200
     resultados = results_response.json()["resultados"]

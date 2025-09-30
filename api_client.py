@@ -69,40 +69,6 @@ def main(base_url: str, json_file_path: str, timeout: int, poll_interval: int, r
         if not consulta_id:
             print("\n❌ No se recibió un ID de consulta. Abortando.")
             return
-
-    # --- 1. Cargar la solicitud desde el archivo JSON ---
-    print_separator(f"Cargando solicitud desde {json_file_path}")
-    try:
-        with open(json_file_path, 'r') as f:
-            request_data = json.load(f)
-        print("Solicitud cargada exitosamente.")
-        print(json.dumps(request_data, indent=2, ensure_ascii=False))
-    except FileNotFoundError:
-        print(f"❌ Error: El archivo '{json_file_path}' no fue encontrado.")
-        return
-    except json.JSONDecodeError:
-        print(f"❌ Error: El archivo '{json_file_path}' no contiene un JSON válido.")
-        return
-
-    # --- 2. Validar la solicitud ---
-    print_separator("Paso 1: Validando la solicitud")
-    try:
-        response = requests.post(f"{base_url}/validate", json=request_data)
-        print_response(response)
-        if response.status_code != 200:
-            print("\n❌ La validación falló. Abortando.")
-            return
-    except requests.ConnectionError as e:
-        print(f"❌ Error de conexión: No se pudo conectar a {base_url}. ¿Está el servidor corriendo?")
-        return
-
-    # --- 3. Crear la consulta ---
-    print_separator("Paso 2: Creando la consulta")
-    response = requests.post(f"{base_url}/query", json=request_data)
-    print_response(response)
-    if response.status_code != 200:
-        print("\n❌ La creación de la consulta falló. Abortando.")
-        return
     
     # --- 4. Monitorear el estado de la consulta ---
     print_separator(f"Paso 3: Monitoreando la consulta '{consulta_id}'")
