@@ -166,9 +166,6 @@ class RecoverFiles:
         base_path /= query_dict.get('sensor', 'abi').lower()
         base_path /= query_dict.get('nivel', 'l1b').lower()
 
-        # Si se especifica un dominio en la consulta, siempre debe ser parte de la ruta.
-        if query_dict.get('dominio'):
-             base_path /= query_dict['dominio'].lower()
         # Para L1b, el dominio siempre es parte de la ruta.
         # Para L2, solo se añade si no se especifican productos, ya que la
         # estructura de directorios para productos específicos puede no incluir el dominio.
