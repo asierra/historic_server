@@ -37,6 +37,11 @@ class RecoverFiles:
 
         self.s3_fallback_enabled = s3_fallback_enabled
 
+    # --- Constantes de Configuración de Satélites ---
+    # TODO: Actualizar esta fecha con la fecha oficial en que GOES-19 se vuelve operacional como GOES-EAST.
+    # Se asume que la fecha está en UTC.
+    GOES19_OPERATIONAL_DATE = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
     # Definir la clase anidada aquí, al principio de la clase, para que esté
     # disponible para todas las anotaciones de tipo de los métodos.
     class ObjetivoBusqueda(NamedTuple):
@@ -125,7 +130,32 @@ class RecoverFiles:
                 self.logger.error(f"❌ No se pudo procesar {archivo_encontrado}: {e}")
                 return archivo_encontrado, [] # Indicate it was found but failed to process
         self.logger.warning(f"⚠️ No se encontró archivo local para el objetivo: {objetivo.patron_busqueda}")
+        self.logger.warning(f"⚠️ No se encontró archivo local para el objetivo: {objetivo.patron_busqueda} en la ruta: {objetivo.directorio_semana}")
         return None
+
+    def _get_sat_code_for_date(self, satellite_name: str, request_date: datetime) -> str:
+        """
+        Determina el código de satélite (G16, G19, etc.) basado en el nombre operacional
+        y la fecha de la solicitud.
+        """
+        # Asegurarse de que la fecha de la solicitud tenga zona horaria para una comparación correcta.
+        if request_date.tzinfo is None:
+            request_date = request_date.replace(tzinfo=timezone.utc)
+
+        if satellite_name == "GOES-EAST":
+            # Si la fecha es posterior a la fecha de operación de GOES-19, usa G19. Si no, G16.
+            return "G19" if request_date >= self.GOES19_OPERATIONAL_DATE else "G16"
+        
+        if satellite_name == "GOES-WEST":
+            # Lógica similar podría aplicarse aquí si GOES-WEST cambia de satélite físico.
+            # Por ahora, asumimos que es G18.
+            return "G18"
+
+        # Para nombres de satélite específicos como "GOES-16", "GOES-18", etc.
+        if '-' in satellite_name:
+            return f"G{satellite_name.split('-')[-1]}"
+        
+        return satellite_name # Fallback
 
     def _generar_objetivos_de_busqueda(self, query_dict: Dict) -> List['RecoverFiles.ObjetivoBusqueda']:
         """
@@ -136,13 +166,13 @@ class RecoverFiles:
         sensor = query_dict.get('sensor', 'abi')
         nivel = query_dict.get('nivel', 'unknown')
         dominio = query_dict.get('dominio', 'fd')
-        sat_code = f"G{satelite.split('-')[-1]}" if '-' in satelite else satelite
 
         # Construir la ruta base de la consulta, incluyendo sensor, nivel y dominio.
         base_path = self.source_data_path
         for key in ['sensor', 'nivel', 'dominio']:
             if query_dict.get(key):
-                base_path /= query_dict[key]
+                # Forzar a minúsculas para coincidir con la estructura de directorios en Linux
+                base_path /= query_dict[key].lower()
 
         for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
             año = fecha_jjj[:4]
@@ -164,8 +194,13 @@ class RecoverFiles:
                     if (dominio == 'conus' and current_dt.minute % 5 == 1) or \
                        (dominio == 'fd' and current_dt.minute % 10 == 0):
                         
-                        timestamp_archivo = f"s{current_dt.strftime('%Y%j%H%M')}00"
-                        patron_busqueda = f"OR_{sensor.upper()}-{nivel}-*-{sat_code}_{timestamp_archivo}.tgz"
+                        # Determinar el código de satélite correcto para esta fecha específica
+                        sat_code = self._get_sat_code_for_date(satelite, current_dt)
+
+                        # Construir el timestamp sin segundos (YYYYJJJHHMM)
+                        timestamp_archivo = f"s{current_dt.strftime('%Y%j%H%M')}"
+                        # Construir el patrón de búsqueda sin el prefijo 'OR_'
+                        patron_busqueda = f"{sensor.upper()}-{nivel}-*-{sat_code}_{timestamp_archivo}.tgz"
 
                         # La fecha original para la reconstrucción de fallos es la clave YYYYJJJ del bucle actual.
                         # El horario original es el rango o valor que estamos iterando.
