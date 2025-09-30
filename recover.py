@@ -180,7 +180,7 @@ class RecoverFiles:
                         s_part_start_idx = archivo.name.find('_s')
                         if s_part_start_idx != -1:
                             # Tomar solo YYYYJJJHHMM (11 dígitos después de 's')
-                            file_ts_str = archivo.name[s_part_start_idx + 1 : s_part_start_idx + 12]
+                            file_ts_str = archivo.name[s_part_start_idx + 2 : s_part_start_idx + 13]
                             file_ts = int(file_ts_str)
 
                             # Comprobar si el timestamp del archivo está en el rango
