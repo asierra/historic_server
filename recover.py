@@ -286,7 +286,8 @@ class RecoverFiles:
 
                     extraer = False
                     if nivel == 'L1b':
-                        if any(f"_C{banda}_" in miembro.name for banda in bandas_solicitadas):
+                        # El formato correcto del nombre de archivo interno es M[Modo]C[Banda]_, ej. M6C13_
+                        if any(f"C{banda}_" in miembro.name for banda in bandas_solicitadas):
                             extraer = True
                     elif nivel == 'L2':
                         if any(f"-L2-{producto}" in miembro.name for producto in productos_solicitados):
