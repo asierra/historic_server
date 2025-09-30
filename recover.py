@@ -205,20 +205,6 @@ def process_single_file_wrapper_process_safe(consulta_id: str, progreso: int, ar
     # pero se llama desde esta función segura para procesos.
     return _recuperar_archivo_process_safe(db_process, consulta_id, progreso, archivo_fuente, directorio_destino, query_dict)
     
-    def _process_single_file_wrapper(self, consulta_id: str, progreso: int, archivo_fuente: Path, directorio_destino: Path, query_dict: Dict):
-        """
-        Wrapper que primero verifica la accesibilidad y luego procesa el archivo.
-        Esta es la función que se ejecuta en el ThreadPoolExecutor.
-        """
-        try:
-            archivo_fuente.stat()
-        except OSError as e:
-            self.logger.warning(f"⚠️ Archivo inaccesible en Lustre, se omitirá: {archivo_fuente.name}. Error: {e}")
-            raise  # Relanzar para que el bucle principal lo marque como fallo.
-
-        # 2. Si es accesible, proceder con la recuperación.
-        return self._recuperar_archivo(consulta_id, progreso, archivo_fuente, directorio_destino, query_dict)
-
 def _recuperar_archivo_process_safe(db_process: ConsultasDatabase, consulta_id: str, progreso: int, archivo_fuente: Path, directorio_destino: Path, query_dict: Dict) -> List[Path]:
     """
     Versión segura para procesos del método _recuperar_archivo.
@@ -281,6 +267,21 @@ def _recuperar_archivo_process_safe(db_process: ConsultasDatabase, consulta_id: 
         raise
 
     return archivos_recuperados
+
+class RecoverFiles(RecoverFiles): # Re-abrir la clase para añadir los métodos
+    def _process_single_file_wrapper(self, consulta_id: str, progreso: int, archivo_fuente: Path, directorio_destino: Path, query_dict: Dict):
+        """
+        Wrapper que primero verifica la accesibilidad y luego procesa el archivo.
+        Esta es la función que se ejecuta en el ThreadPoolExecutor.
+        """
+        try:
+            archivo_fuente.stat()
+        except OSError as e:
+            self.logger.warning(f"⚠️ Archivo inaccesible en Lustre, se omitirá: {archivo_fuente.name}. Error: {e}")
+            raise  # Relanzar para que el bucle principal lo marque como fallo.
+
+        # 2. Si es accesible, proceder con la recuperación.
+        return self._recuperar_archivo(consulta_id, progreso, archivo_fuente, directorio_destino, query_dict)
 
     def _discover_and_filter_files(self, query_dict: Dict) -> (List[Path], List[Path]):
         """
