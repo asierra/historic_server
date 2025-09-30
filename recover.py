@@ -5,8 +5,7 @@ import tarfile
 from typing import List, Dict, Optional, NamedTuple
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from pebble import ProcessPool
-from pebble.common import TimeoutError as PebbleTimeoutError
+from pebble import ProcessPool, ProcessExpired
 import s3fs
 
 from database import ConsultasDatabase
@@ -132,7 +131,7 @@ class RecoverFiles:
                     self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Procesando archivo {i+1}/{total_pendientes}")
                     try:
                         future.result()  # Pebble maneja el timeout internamente
-                    except PebbleTimeoutError:
+                    except ProcessExpired:
                         self.logger.error(f"❌ Procesamiento del archivo {archivo_fuente.name} excedió el tiempo límite de {self.FILE_PROCESSING_TIMEOUT_SECONDS}s y fue terminado.")
                         objetivos_fallidos_local.append(archivo_fuente)
                     except Exception as e:
