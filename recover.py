@@ -121,32 +121,43 @@ class RecoverFiles:
             if archivos_pendientes_local:
                 # Ya no usamos 'with', usamos el executor global
                 future_to_objetivo = {
-                    self.executor.submit(self._process_single_file_wrapper, consulta_id, 0, archivo_a_procesar, directorio_destino, query_dict): archivo_a_procesar
+                    self.executor.submit(self._process_single_file_wrapper, consulta_id, 0, archivo_a_procesar, directorio_destino, query_dict): (archivo_a_procesar, time.time())
                     for i, archivo_a_procesar in enumerate(archivos_pendientes_local)
                 }
-
-                # Usar wait() con un timeout global para todo el lote de archivos.
-                # El timeout es el tiempo por archivo multiplicado por el número de archivos, más un margen.
-                timeout_global = self.FILE_PROCESSING_TIMEOUT_SECONDS * total_pendientes + 60
-                done, not_done = concurrent.futures.wait(future_to_objetivo.keys(), timeout=timeout_global, return_when=concurrent.futures.ALL_COMPLETED)
-
-                # Procesar los que sí terminaron
-                for i, future in enumerate(done):
-                    archivo_fuente = future_to_objetivo[future]
-                    progreso = 20 + int(((i + 1) / total_pendientes) * 60)
-                    self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Procesando archivo {i+1}/{total_pendientes}")
+                
+                completed_count = 0
+                while completed_count < total_pendientes:
+                    # Usar as_completed con un timeout para no bloquear el bucle indefinidamente
                     try:
-                        future.result() # Obtener el resultado (o la excepción si falló)
-                    except Exception as e:
-                        self.logger.error(f"❌ Error procesando el archivo {archivo_fuente.name}: {e}")
-                        objetivos_fallidos_local.append(archivo_fuente)
-
-                # Marcar como fallidos los que no terminaron a tiempo
-                for future in not_done:
-                    archivo_fuente = future_to_objetivo[future]
-                    self.logger.error(f"❌ Procesamiento del archivo {archivo_fuente.name} excedió el tiempo límite global.")
-                    objetivos_fallidos_local.append(archivo_fuente)
-                    future.cancel()
+                        for future in concurrent.futures.as_completed(future_to_objetivo.keys(), timeout=self.FILE_PROCESSING_TIMEOUT_SECONDS + 5):
+                            archivo_fuente, _ = future_to_objetivo[future]
+                            completed_count += 1
+                            progreso = 20 + int((completed_count / total_pendientes) * 60)
+                            self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Procesando archivo {completed_count}/{total_pendientes}")
+                            
+                            try:
+                                future.result() # Obtener resultado o excepción
+                            except Exception as e:
+                                self.logger.error(f"❌ Error procesando el archivo {archivo_fuente.name}: {e}")
+                                objetivos_fallidos_local.append(archivo_fuente)
+                            
+                            # Eliminar la tarea del diccionario para no volver a procesarla
+                            del future_to_objetivo[future]
+                    except concurrent.futures.TimeoutError:
+                        # Si as_completed llega a su timeout, significa que hay tareas colgadas.
+                        # Las identificamos y marcamos como fallidas.
+                        now = time.time()
+                        colgadas = []
+                        for future, (archivo, start_time) in future_to_objetivo.items():
+                            if now - start_time > self.FILE_PROCESSING_TIMEOUT_SECONDS:
+                                self.logger.error(f"❌ Procesamiento del archivo {archivo.name} excedió el tiempo límite de {self.FILE_PROCESSING_TIMEOUT_SECONDS}s.")
+                                objetivos_fallidos_local.append(archivo)
+                                future.cancel()
+                                colgadas.append(future)
+                        
+                        for future in colgadas:
+                            del future_to_objetivo[future]
+                            completed_count += 1 # Contarla como "completada" (con fallo) para que el bucle termine
 
             # 5. (Opcional) Intentar recuperar los fallidos desde S3
             if self.s3_fallback_enabled: # Siempre intentar S3 si está habilitado
