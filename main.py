@@ -14,7 +14,7 @@ import uvicorn
 import os # Importar os para leer variables de entorno
 import secrets
 import string
-import concurrent.futures
+from pebble import ProcessPool
 
 # --- Configuración de Logging ---
 # Configura el logging para escribir en un archivo en un entorno de producción.
@@ -39,7 +39,8 @@ async def lifespan(app: FastAPI):
     # Código de apagado
     logging.info("⏳ Servidor recibiendo señal de apagado...")
     logging.info("   Esperando a que las tareas de fondo se completen...")
-    executor.shutdown(wait=True)
+    executor.close()
+    executor.join()
     logging.info("✅ Todas las tareas de fondo han finalizado. Servidor apagado.")
 
 app = FastAPI(
@@ -67,7 +68,7 @@ PROCESSOR_MODE = os.getenv("PROCESSOR_MODE", "real") # 'real' o 'simulador'
 
 # Crear un único ThreadPoolExecutor para toda la aplicación
 MAX_WORKERS = int(os.getenv("HISTORIC_MAX_WORKERS", "8"))
-executor = concurrent.futures.ProcessPoolExecutor(max_workers=MAX_WORKERS)
+executor = ProcessPool(max_workers=MAX_WORKERS)
 
 # Inicializar componentes
 db = ConsultasDatabase(db_path=DB_PATH)

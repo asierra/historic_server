@@ -5,7 +5,7 @@ import tarfile
 from typing import List, Dict, Optional, NamedTuple
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import concurrent.futures
+from pebble import ProcessPool, TimeoutError as PebbleTimeoutError
 import s3fs
 
 from database import ConsultasDatabase
@@ -19,7 +19,7 @@ class RecoverFiles:
     """
     def __init__(self, db: ConsultasDatabase,
         source_data_path: str = "/depot/goes16", base_download_path: str = "/data/tmp",
-        s3_fallback_enabled: bool = True, executor: concurrent.futures.ProcessPoolExecutor = None):
+        s3_fallback_enabled: bool = True, executor: ProcessPool = None):
         self.db = db
         self.source_data_path = Path(source_data_path)
         self.base_download_path = Path(base_download_path)
@@ -121,42 +121,22 @@ class RecoverFiles:
             if archivos_pendientes_local:
                 # Ya no usamos 'with', usamos el executor global
                 future_to_objetivo = {
-                    self.executor.submit(process_single_file_wrapper_process_safe, consulta_id, 0, archivo_a_procesar, directorio_destino, query_dict, self.db.db_path): (archivo_a_procesar, time.time())
+                    self.executor.schedule(process_single_file_wrapper_process_safe, args=(consulta_id, 0, archivo_a_procesar, directorio_destino, query_dict, self.db.db_path), timeout=self.FILE_PROCESSING_TIMEOUT_SECONDS): archivo_a_procesar
                     for i, archivo_a_procesar in enumerate(archivos_pendientes_local)
                 }
                 
-                # --- Bucle de Monitoreo Activo ---
-                # Este bucle es más robusto que as_completed para manejar timeouts individuales.
-                while future_to_objetivo:
-                    done_futures = []
-                    # Revisar el estado de cada futuro sin bloquear
-                    for future, (archivo, start_time) in future_to_objetivo.items():
-                        if future.done():
-                            try:
-                                future.result() # Obtener resultado para relanzar la excepción si la hubo
-                            except Exception as e:
-                                self.logger.error(f"❌ Error procesando el archivo {archivo.name}: {e}")
-                                objetivos_fallidos_local.append(archivo)
-                            done_futures.append(future)
-                        
-                        # Verificar timeout individual
-                        elif time.time() - start_time > self.FILE_PROCESSING_TIMEOUT_SECONDS:
-                            self.logger.error(f"❌ Procesamiento del archivo {archivo.name} excedió el tiempo límite de {self.FILE_PROCESSING_TIMEOUT_SECONDS}s.")
-                            objetivos_fallidos_local.append(archivo)
-                            future.cancel() # Intentar cancelar la tarea
-                            done_futures.append(future)
-
-                    # Limpiar las tareas ya finalizadas (o con timeout)
-                    for future in done_futures:
-                        del future_to_objetivo[future]
-
-                    # Actualizar progreso y esperar un poco antes de la siguiente verificación
-                    completed_count = total_pendientes - len(future_to_objetivo)
-                    progreso = 20 + int((completed_count / total_pendientes) * 60)
-                    self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Procesando archivo {completed_count}/{total_pendientes}")
-
-                    if future_to_objetivo: # Solo esperar si aún quedan tareas
-                        time.sleep(1) # Intervalo de sondeo
+                for i, future in enumerate(future_to_objetivo.keys()):
+                    archivo_fuente = future_to_objetivo[future]
+                    progreso = 20 + int(((i + 1) / total_pendientes) * 60)
+                    self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Procesando archivo {i+1}/{total_pendientes}")
+                    try:
+                        future.result()  # Pebble maneja el timeout internamente
+                    except PebbleTimeoutError:
+                        self.logger.error(f"❌ Procesamiento del archivo {archivo_fuente.name} excedió el tiempo límite de {self.FILE_PROCESSING_TIMEOUT_SECONDS}s y fue terminado.")
+                        objetivos_fallidos_local.append(archivo_fuente)
+                    except Exception as e:
+                        self.logger.error(f"❌ Error procesando el archivo {archivo_fuente.name}: {e}")
+                        objetivos_fallidos_local.append(archivo_fuente)
 
             # 5. (Opcional) Intentar recuperar los fallidos desde S3
             if self.s3_fallback_enabled: # Siempre intentar S3 si está habilitado
@@ -457,28 +437,33 @@ class RecoverFiles(RecoverFiles): # Re-abrir la clase para añadir los métodos
 
         # Construir la consulta de recuperación con los objetivos que fallaron
         fechas_fallidas = defaultdict(list)
-        # Esta lógica necesita ser repensada ya que ya no tenemos 'ObjetivoBusqueda'
-        # Por ahora, la dejaremos vacía, ya que S3 debería encontrar lo que falta.
-        # for obj in objetivos_fallidos:
-        #     pass
+        original_fechas = query_original.get('_original_request', {}).get('fechas', {})
+
+        for archivo_fallido in objetivos_fallidos:
+            try:
+                # Extraer YYYYJJJHHMM del nombre del archivo fallido
+                ts_str = archivo_fallido.name.split('-s')[1].split('.')[0]
+                fecha_jjj = ts_str[:7]
+                horario_hhmm = ts_str[7:11]
+                
+                # Encontrar el rango horario original al que pertenece este timestamp
+                for fecha_key, horarios_list in original_fechas.items():
+                    for horario_rango in horarios_list:
+                        # Esta es una simplificación; una lógica más compleja podría verificar el rango exacto
+                        if horario_hhmm[:2] in horario_rango and fecha_jjj[4:] in fecha_key:
+                             if horario_rango not in fechas_fallidas[fecha_key]:
+                                fechas_fallidas[fecha_key].append(horario_rango)
+            except (IndexError, ValueError):
+                continue
 
         consulta_recuperacion = None
         if fechas_fallidas:
-            # Opcional: añadir una nota sobre el origen de esta consulta
-            # Reconstruir la consulta de recuperación a partir de la original,
-            # pero convirtiendo las fechas julianas de los fallos de nuevo a YYYYMMDD.
-            fechas_recuperacion_ymd = defaultdict(list)
-            for fecha_jjj, horarios in fechas_fallidas.items():
-                fecha_dt = datetime.strptime(fecha_jjj, "%Y%j")
-                fecha_ymd = fecha_dt.strftime("%Y%m%d")
-                fechas_recuperacion_ymd[fecha_ymd].extend(horarios)
-
             # Usar la solicitud original como base
             consulta_recuperacion = query_original.get('_original_request', {}).copy() or {}
             # Limpiar campos que no son parte de una solicitud
             consulta_recuperacion.pop('creado_por', None)
             # Reemplazar con las fechas fallidas
-            consulta_recuperacion['fechas'] = dict(fechas_recuperacion_ymd)
+            consulta_recuperacion['fechas'] = dict(fechas_fallidas)
             consulta_recuperacion['descripcion'] = f"Consulta de recuperación para la solicitud original {consulta_id}"
 
         return {
