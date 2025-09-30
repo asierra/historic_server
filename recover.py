@@ -5,7 +5,8 @@ import tarfile
 from typing import List, Dict, Optional, NamedTuple
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from pebble import ProcessPool, TimeoutError as PebbleTimeoutError
+from pebble import ProcessPool
+from pebble.common import TimeoutError as PebbleTimeoutError
 import s3fs
 
 from database import ConsultasDatabase
