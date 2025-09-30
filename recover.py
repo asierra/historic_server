@@ -128,13 +128,18 @@ class RecoverFiles:
                     self.db.actualizar_estado(consulta_id, "procesando", None, f"Procesando archivo {i+1}/{total_pendientes}")
 
                     try:
-                        future.result(timeout=self.FILE_PROCESSING_TIMEOUT_SECONDS) # Esperar con timeout
+                        # Esperar el resultado con un timeout.
+                        # La excepción TimeoutError será capturada y manejada.
+                        future.result(timeout=self.FILE_PROCESSING_TIMEOUT_SECONDS)
                     except concurrent.futures.TimeoutError:
                         self.logger.error(f"❌ Procesamiento del archivo {archivo_fuente.name} excedió el tiempo límite de {self.FILE_PROCESSING_TIMEOUT_SECONDS} segundos.")
                         objetivos_fallidos_local.append(archivo_fuente)
+                        # Cancelar el futuro es una buena práctica, aunque no detiene el hilo si ya está en una operación de bloqueo.
+                        future.cancel()
                     except Exception as e: # Catch exceptions from _process_single_objective
                         self.logger.error(f"❌ Error procesando el archivo {archivo_fuente.name}: {e}")
                         objetivos_fallidos_local.append(archivo_fuente)
+
 
             # 5. (Opcional) Intentar recuperar los fallidos desde S3
             if self.s3_fallback_enabled: # Siempre intentar S3 si está habilitado
@@ -265,26 +270,30 @@ class RecoverFiles:
                 miembros_del_tar = tar.getmembers()
 
                 for miembro in miembros_del_tar:
-                    if miembro.isfile(): # Solo procesar archivos, no directorios
+                    if miembro.isfile():
                         # Extraer producto L2 (ej. CMIP de -L2-CMIPF-)
                         if "-L2-" in miembro.name:
                             try: productos_en_tgz.add(miembro.name.split('-L2-')[1].split('F-')[0])
                             except IndexError: pass
                         # Extraer banda L1b (ej. 13 de M6C13_)
                         if "C" in miembro.name and "_" in miembro.name:
-                             try: bandas_en_tgz.add(miembro.name.split('C', 1)[1].split('_', 1)[0])
-                             except IndexError: pass
+                            try:
+                                banda = miembro.name.split('C', 1)[1].split('_', 1)[0]
+                                if banda.isdigit():
+                                    bandas_en_tgz.add(banda)
+                            except IndexError: pass
 
                 # 2. Decidir si copiar o extraer
                 nivel = query_dict.get('nivel')
-                # Si productos_solicitados/bandas_solicitadas es None o [], significa que el usuario quiere TODO.
-                # En ese caso, copiamos el TGZ completo.
                 productos_solicitados = set(query_dict.get('productos') or [])
                 bandas_solicitadas = set(query_dict.get('bandas') or [])
 
-                # Copiar el .tgz completo si el usuario NO especificó productos/bandas (quiere todo).
+                # Copiar el .tgz completo si el usuario no especificó productos/bandas (quiere todo)
+                # O si el tgz contiene más de lo que se pidió (para no perder datos).
                 copiar_tgz_completo = (nivel == 'L2' and not productos_solicitados) or \
-                                      (nivel == 'L1b' and not bandas_solicitadas)
+                                      (nivel == 'L1b' and not bandas_solicitadas) or \
+                                      (nivel == 'L2' and productos_solicitados and not productos_en_tgz.issubset(productos_solicitados)) or \
+                                      (nivel == 'L1b' and bandas_solicitadas and not bandas_en_tgz.issubset(bandas_solicitadas))
 
                 if copiar_tgz_completo:
                     self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Copiando (contenido mixto): {archivo_fuente.name}")
