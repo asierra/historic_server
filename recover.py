@@ -191,17 +191,20 @@ class RecoverFiles:
             # Hacemos el glob más genérico para que coincida con cualquier prefijo (OR_, CG_, ABI-, etc.)
             # y cualquier cosa entre el prefijo y el timestamp.
             archivos_candidatos = list(directorio_semana.glob(f"*{año}{dia_del_año_int:03d}*.tgz"))
+            self.logger.debug(f"  Directorio: {directorio_semana}, Candidatos encontrados: {len(archivos_candidatos)}")
 
             for horario_str in horarios_list:
                 partes = horario_str.split('-')
                 inicio_str, fin_str = partes[0], partes[1] if len(partes) > 1 else partes[0]
                 
+                self.logger.debug(f"    Procesando rango horario: {horario_str}")
                 # Convertir a timestamps para comparación numérica
                 # Ajustar los timestamps para cubrir el rango horario completo.
                 # inicio_ts será el minuto 00 de la hora de inicio.
                 # fin_ts será el minuto 59 de la hora de fin.
                 inicio_ts = int(f"{año}{dia_del_año_int:03d}{inicio_str[:2]}00")
                 fin_ts = int(f"{año}{dia_del_año_int:03d}{fin_str[:2]}59")
+                self.logger.debug(f"      Rango de timestamp numérico: {inicio_ts} - {fin_ts}")
 
                 for archivo in archivos_candidatos:
                     try:
@@ -211,11 +214,13 @@ class RecoverFiles:
                             # Tomar solo YYYYJJJHHMM (11 dígitos después de 's')
                             file_ts_str = archivo.name[s_part_start_idx + 2 : s_part_start_idx + 13]
                             file_ts = int(file_ts_str)
+                            self.logger.debug(f"        - Archivo: {archivo.name}, Timestamp extraído: {file_ts}")
 
                             # Comprobar si el timestamp del archivo está en el rango
                             if inicio_ts <= file_ts <= fin_ts:
                                 if archivo not in archivos_encontrados:
                                     archivos_encontrados.append(archivo)
+                                    self.logger.debug(f"          -> ✅ AÑADIDO")
                     except (ValueError, IndexError):
                         # Ignorar archivos con nombres mal formados
                         continue
