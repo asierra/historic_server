@@ -30,6 +30,8 @@ class RecoverFiles:
         self.logger.info(f"   - Origen de datos (Lustre): {self.source_data_path}")
         self.logger.info(f"   - Directorio de descargas: {self.base_download_path}")
         self.logger.info(f"   - Fallback a S3: {'Activado' if s3_fallback_enabled else 'Desactivado'}")
+        self.FILE_PROCESSING_TIMEOUT_SECONDS = int(os.getenv("FILE_PROCESSING_TIMEOUT_SECONDS", "120")) # 2 minutos
+        self.logger.info(f"   - Timeout para procesamiento de archivos: {self.FILE_PROCESSING_TIMEOUT_SECONDS}s")
         # --- Configuración para reintentos ---
         self.S3_RETRY_ATTEMPTS = 3
         self.S3_RETRY_BACKOFF_SECONDS = 2
@@ -126,7 +128,10 @@ class RecoverFiles:
                     self.db.actualizar_estado(consulta_id, "procesando", None, f"Procesando archivo {i+1}/{total_pendientes}")
 
                     try:
-                        future.result() # Esperar a que termine, el resultado es una lista de archivos que no necesitamos aquí
+                        future.result(timeout=self.FILE_PROCESSING_TIMEOUT_SECONDS) # Esperar con timeout
+                    except concurrent.futures.TimeoutError:
+                        self.logger.error(f"❌ Procesamiento del archivo {archivo_fuente.name} excedió el tiempo límite de {self.FILE_PROCESSING_TIMEOUT_SECONDS} segundos.")
+                        objetivos_fallidos_local.append(archivo_fuente)
                     except Exception as e: # Catch exceptions from _process_single_objective
                         self.logger.error(f"❌ Error procesando el archivo {archivo_fuente.name}: {e}")
                         objetivos_fallidos_local.append(archivo_fuente)
@@ -260,35 +265,26 @@ class RecoverFiles:
                 miembros_del_tar = tar.getmembers()
 
                 for miembro in miembros_del_tar:
-                    if miembro.isfile():
+                    if miembro.isfile(): # Solo procesar archivos, no directorios
                         # Extraer producto L2 (ej. CMIP de -L2-CMIPF-)
                         if "-L2-" in miembro.name:
-                            try:
-                                producto = miembro.name.split('-L2-')[1].split('F-')[0]
-                                productos_en_tgz.add(producto)
-                            except IndexError:
-                                continue
+                            try: productos_en_tgz.add(miembro.name.split('-L2-')[1].split('F-')[0])
+                            except IndexError: pass
                         # Extraer banda L1b (ej. 13 de M6C13_)
                         if "C" in miembro.name and "_" in miembro.name:
-                             try:
-                                banda = miembro.name.split('C', 1)[1].split('_', 1)[0]
-                                if banda.isdigit():
-                                    bandas_en_tgz.add(banda)
-                             except IndexError:
-                                 continue
+                             try: bandas_en_tgz.add(miembro.name.split('C', 1)[1].split('_', 1)[0])
+                             except IndexError: pass
 
                 # 2. Decidir si copiar o extraer
                 nivel = query_dict.get('nivel')
+                # Si productos_solicitados/bandas_solicitadas es None o [], significa que el usuario quiere TODO.
+                # En ese caso, copiamos el TGZ completo.
                 productos_solicitados = set(query_dict.get('productos') or [])
                 bandas_solicitadas = set(query_dict.get('bandas') or [])
 
-                # Copiar el .tgz completo si:
-                # - No se especificaron productos/bandas (se quiere todo).
-                # - El .tgz contiene más productos/bandas de los solicitados.
+                # Copiar el .tgz completo si el usuario NO especificó productos/bandas (quiere todo).
                 copiar_tgz_completo = (nivel == 'L2' and not productos_solicitados) or \
-                                      (nivel == 'L1b' and not bandas_solicitadas) or \
-                                      (nivel == 'L2' and not productos_en_tgz.issubset(productos_solicitados)) or \
-                                      (nivel == 'L1b' and not bandas_en_tgz.issubset(bandas_solicitadas))
+                                      (nivel == 'L1b' and not bandas_solicitadas)
 
                 if copiar_tgz_completo:
                     self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Copiando (contenido mixto): {archivo_fuente.name}")
