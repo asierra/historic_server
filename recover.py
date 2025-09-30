@@ -114,6 +114,8 @@ class RecoverFiles:
             self.db.actualizar_estado(consulta_id, "procesando", 20, f"Identificados {total_pendientes} archivos pendientes de procesar.")
 
             objetivos_fallidos_local = []
+            # Los archivos inaccesibles ya se consideran fallidos desde el principio.
+            objetivos_fallidos_local.extend(inaccessible_files_local)
             
             # 4. Procesar cada objetivo PENDIENTE en paralelo
             if archivos_pendientes_local:
@@ -165,7 +167,7 @@ class RecoverFiles:
             self.logger.error(f"❌ Error procesando consulta {consulta_id}: {e}")
             self.db.actualizar_estado(consulta_id, "error", 0, f"Error: {str(e)}")
     
-    def _discover_and_filter_files(self, query_dict: Dict) -> List[Path]:
+    def _discover_and_filter_files(self, query_dict: Dict) -> (List[Path], List[Path]):
         """
         Descubre todos los archivos en los directorios relevantes y los filtra
         según los rangos de tiempo de la consulta.
@@ -229,7 +231,20 @@ class RecoverFiles:
                         # Ignorar archivos con nombres mal formados
                         continue
         
-        return archivos_encontrados
+        # --- Verificación de Accesibilidad (Pre-flight Check) ---
+        accessible_files = []
+        inaccessible_files = []
+        if archivos_encontrados:
+            self.logger.info(f"Verificando accesibilidad de {len(archivos_encontrados)} archivos encontrados...")
+            for archivo in archivos_encontrados:
+                try:
+                    # stat() es una llamada ligera que fallará si el archivo tiene problemas de acceso en el FS.
+                    archivo.stat()
+                    accessible_files.append(archivo)
+                except OSError as e:
+                    self.logger.warning(f"⚠️ Archivo inaccesible en Lustre, se omitirá: {archivo.name}. Error: {e}")
+                    inaccessible_files.append(archivo)
+        return accessible_files, inaccessible_files
 
     def _get_sat_code_for_date(self, satellite_name: str, request_date: datetime) -> str:
         """
