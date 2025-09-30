@@ -200,7 +200,12 @@ class RecoverFiles:
                         # Construir el timestamp sin segundos (YYYYJJJHHMM)
                         timestamp_archivo = f"s{current_dt.strftime('%Y%j%H%M')}"
                         # Construir el patrón de búsqueda sin el prefijo 'OR_'
-                        patron_busqueda = f"{sensor.upper()}-{nivel}-*-{sat_code}_{timestamp_archivo}.tgz"
+                        # y añadiendo el modo de escaneo (ej. RadF-M6) para L1b.
+                        if nivel == 'L1b' and sensor == 'abi':
+                            # Para ABI L1b, el modo de escaneo es parte del nombre.
+                            patron_busqueda = f"{sensor.upper()}-{nivel}-RadF-M6_{sat_code}_{timestamp_archivo}.tgz"
+                        else:
+                            patron_busqueda = f"{sensor.upper()}-{nivel}-*-{sat_code}_{timestamp_archivo}.tgz"
 
                         # La fecha original para la reconstrucción de fallos es la clave YYYYJJJ del bucle actual.
                         # El horario original es el rango o valor que estamos iterando.
