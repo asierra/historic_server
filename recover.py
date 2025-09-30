@@ -121,7 +121,7 @@ class RecoverFiles:
             if archivos_pendientes_local:
                 # Ya no usamos 'with', usamos el executor global
                 future_to_objetivo = {
-                    self.executor.schedule(process_single_file_wrapper_process_safe, args=(consulta_id, 0, archivo_a_procesar, directorio_destino, query_dict, self.db.db_path), timeout=self.FILE_PROCESSING_TIMEOUT_SECONDS): archivo_a_procesar
+                    self.executor.schedule(process_single_file_wrapper_process_safe, args=(archivo_a_procesar, directorio_destino, query_dict), timeout=self.FILE_PROCESSING_TIMEOUT_SECONDS): archivo_a_procesar
                     for i, archivo_a_procesar in enumerate(archivos_pendientes_local)
                 }
                 
@@ -166,12 +166,10 @@ class RecoverFiles:
 # ProcessPoolExecutor requiere que las funciones que se ejecutan en otros procesos
 # estén definidas a nivel superior del módulo, no como métodos de una clase.
 
-def process_single_file_wrapper_process_safe(consulta_id: str, progreso: int, archivo_fuente: Path, directorio_destino: Path, query_dict: Dict, db_path: str):
+def process_single_file_wrapper_process_safe(archivo_fuente: Path, directorio_destino: Path, query_dict: Dict):
     """
     Función segura para procesos que envuelve la lógica de procesamiento de un archivo.
     """
-    # Cada proceso necesita su propia instancia de la base de datos.
-    db_process = ConsultasDatabase(db_path=db_path)
     
     try:
         # Verificación de accesibilidad
@@ -182,13 +180,11 @@ def process_single_file_wrapper_process_safe(consulta_id: str, progreso: int, ar
 
     # Si es accesible, proceder con la recuperación.
     # La lógica de recuperación real se mantiene en un método para reutilización,
-    # pero se llama desde esta función segura para procesos.
-    return _recuperar_archivo_process_safe(db_process, consulta_id, progreso, archivo_fuente, directorio_destino, query_dict)
+    return _recuperar_archivo_process_safe(archivo_fuente, directorio_destino, query_dict)
     
-def _recuperar_archivo_process_safe(db_process: ConsultasDatabase, consulta_id: str, progreso: int, archivo_fuente: Path, directorio_destino: Path, query_dict: Dict) -> List[Path]:
+def _recuperar_archivo_process_safe(archivo_fuente: Path, directorio_destino: Path, query_dict: Dict) -> List[Path]:
     """
     Versión segura para procesos del método _recuperar_archivo.
-    No usa 'self' y recibe una instancia de la DB.
     """
     archivos_recuperados = []
     
@@ -220,7 +216,6 @@ def _recuperar_archivo_process_safe(db_process: ConsultasDatabase, consulta_id: 
                                   (nivel == 'L1b' and bandas_solicitadas and not bandas_en_tgz.issubset(bandas_solicitadas))
 
             if copiar_tgz_completo:
-                db_process.actualizar_estado(consulta_id, "procesando", progreso, f"Copiando (contenido mixto): {archivo_fuente.name}")
                 logging.debug(f"📦 Copiando archivo completo (contenido mixto): {archivo_fuente.name}")
                 shutil.copy(archivo_fuente, directorio_destino)
                 archivos_recuperados.append(directorio_destino / archivo_fuente.name)
@@ -233,7 +228,6 @@ def _recuperar_archivo_process_safe(db_process: ConsultasDatabase, consulta_id: 
                     miembros_a_extraer.append(miembro)
             
             if miembros_a_extraer:
-                db_process.actualizar_estado(consulta_id, "procesando", progreso, f"Extrayendo de: {archivo_fuente.name}")
                 logging.debug(f"🔎 Extrayendo {len(miembros_a_extraer)} archivos de {archivo_fuente.name}")
                 tar.extractall(path=directorio_destino, members=miembros_a_extraer)
                 for miembro in miembros_a_extraer:
