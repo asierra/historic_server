@@ -5,8 +5,8 @@ import tarfile
 from typing import List, Dict, Optional, NamedTuple
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from pebble import ProcessPool, ProcessExpired
-import s3fs
+from pebble import ProcessPool
+from concurrent.futures import TimeoutError
 
 from database import ConsultasDatabase
 
@@ -141,7 +141,7 @@ class RecoverFiles:
                     self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Procesando archivo {i+1}/{total_pendientes}")
                     try:
                         future.result()  # Pebble maneja el timeout internamente
-                    except ProcessExpired:
+                    except TimeoutError:
                         self.logger.error(f"❌ Procesamiento del archivo {archivo_fuente.name} excedió el tiempo límite de {self.FILE_PROCESSING_TIMEOUT_SECONDS}s y fue terminado.")
                         objetivos_fallidos_local.append(archivo_fuente)
                     except Exception as e:
@@ -492,6 +492,7 @@ class RecoverFiles(RecoverFiles): # Re-abrir la clase para añadir los métodos
         Intenta descargar desde S3 los archivos que no se encontraron localmente.
         """
         from botocore.config import Config
+        import s3fs
         # Configurar timeouts para el cliente S3 para evitar que se quede colgado indefinidamente.
         # connect_timeout: tiempo para establecer la conexión.
         # read_timeout: tiempo de espera para recibir datos una vez conectado.
