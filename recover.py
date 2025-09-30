@@ -228,14 +228,24 @@ class RecoverFiles:
                     current_dt += timedelta(minutes=1)
         return objetivos
     def _buscar_archivo_para_objetivo(self, objetivo: ObjetivoBusqueda) -> Optional[Path]:
-        """Busca en disco un archivo que coincida con el patrón del objetivo."""
+        """
+        Busca en disco un archivo que coincida con el timestamp del objetivo.
+        Este método es más robusto que un glob directo, ya que solo busca la parte
+        del timestamp en el nombre del archivo.
+        """
         if not objetivo.directorio_semana.exists():
             return None
         
-        # Usamos glob para encontrar el archivo exacto, permitiendo variaciones menores (ej. RadF-M6)
-        archivos_encontrados = list(objetivo.directorio_semana.glob(objetivo.patron_busqueda))
-        if archivos_encontrados:
-            return archivos_encontrados[0] # Devolver solo el primero, asumiendo que es único
+        # Extraer el timestamp del patrón de búsqueda (ej. 's20252462220')
+        try:
+            timestamp_part = objetivo.patron_busqueda.split('-s')[1].split('.')[0]
+            search_str = f"-s{timestamp_part}"
+        except IndexError:
+            return None # Patrón de búsqueda inválido
+
+        for f in objetivo.directorio_semana.glob('*.tgz'):
+            if search_str in f.name:
+                return f # Devolver la primera coincidencia
         return None
 
     def _recuperar_archivo(self, archivo_fuente: Path, directorio_destino: Path, query_dict: Dict) -> List[Path]:
