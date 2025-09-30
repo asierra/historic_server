@@ -52,39 +52,6 @@ class RecoverFiles:
         horario_original: str # HH:MM o HH:MM-HH:MM
 
     def procesar_consulta(self, consulta_id: str, query_dict: Dict):
-        """
-        Procesa una consulta de recuperación de archivos.
-        Esta función es idempotente: si se vuelve a ejecutar para una consulta
-        interrumpida, escaneará los archivos ya recuperados y solo procesará
-        los que falten.
-        """
-        def _scan_existing_files(objetivos: List[self.ObjetivoBusqueda], destino: Path) -> (List[Path], List[self.ObjetivoBusqueda]):
-            """
-            Escanea el directorio de destino en busca de archivos ya recuperados.
-            Devuelve una tupla: (lista_de_archivos_ya_recuperados, lista_de_objetivos_pendientes).
-            """
-            if not destino.exists():
-                return [], objetivos
-
-            self.logger.info(f"🔍 Escaneando {destino} en busca de archivos existentes...")
-            archivos_existentes = {f.name for f in destino.iterdir()}
-            objetivos_pendientes = []
-            archivos_recuperados = []
-
-            for obj in objetivos:
-                # Construimos el nombre de archivo esperado a partir del patrón
-                nombre_archivo_esperado = f"{obj.patron_busqueda}*.tgz" # Asumimos que el patrón es suficiente
-                # Esta lógica es simplificada. Asume que si un .tgz con el timestamp existe, el objetivo está completo.
-                # Una mejora sería verificar el contenido si se extrajeron archivos .nc.
-                if any(Path(f).match(nombre_archivo_esperado) for f in archivos_existentes):
-                    self.logger.debug(f"✅ Objetivo ya completado (archivo encontrado): {obj.patron_busqueda}")
-                    archivos_recuperados.append(next(destino.glob(nombre_archivo_esperado)))
-                else:
-                    objetivos_pendientes.append(obj)
-            
-            self.logger.info(f"📊 Escaneo completo. {len(archivos_recuperados)} objetivos ya recuperados, {len(objetivos_pendientes)} pendientes.")
-            return archivos_recuperados, objetivos_pendientes
-
         try:
             self.logger.info(f" Atendiendo solicitud {consulta_id}")
 
@@ -107,14 +74,14 @@ class RecoverFiles:
             self.db.actualizar_estado(consulta_id, "procesando", 20, f"Identificados {total_objetivos_pendientes} archivos pendientes de procesar.")
 
             objetivos_fallidos = []
-
+            
             # 4. Procesar cada objetivo PENDIENTE en paralelo
             newly_recovered_from_lustre = [] # Collect files recovered in this run
             if objetivos_pendientes:
                 # Ya no usamos 'with', usamos el executor global
                 future_to_objetivo = {
-                    self.executor.submit(self._process_single_objective, consulta_id, objetivo, directorio_destino, query_dict, idx, total_objetivos_pendientes): (objetivo, idx)
-                    for idx, objetivo in enumerate(objetivos_pendientes) # Usar enumerate para obtener el índice 'idx'
+                    self.executor.submit(self._recuperar_archivo, consulta_id, 0, archivo_a_procesar, directorio_destino, query_dict): archivo_a_procesar
+                    for archivo_a_procesar in objetivos_pendientes
                 }
 
                 for i, future in enumerate(concurrent.futures.as_completed(future_to_objetivo)):
@@ -125,13 +92,13 @@ class RecoverFiles:
 
                     try:
                         result = future.result() # (found_file_path, list_of_recovered_files)
-                        if result and result[0]: # If file was found and processed
-                            newly_recovered_from_lustre.extend(result[1])
+                        if result: # Si la recuperación fue exitosa, result es una lista de archivos
+                            newly_recovered_from_lustre.extend(result)
                         else: # File not found or error during processing
                             objetivos_fallidos.append(objetivo)
                     except Exception as e: # Catch exceptions from _process_single_objective
                         self.logger.error(f"❌ Error procesando objetivo {objetivo.patron_busqueda}: {e}")
-                        objetivos_fallidos.append(objetivo)
+                        objetivos_fallidos.append(objetivo) # Aquí 'objetivo' es la ruta del archivo
 
             # 5. (Opcional) Intentar recuperar los fallidos desde S3
             if self.s3_fallback_enabled and objetivos_fallidos:
@@ -157,24 +124,6 @@ class RecoverFiles:
             self.logger.error(f"❌ Error procesando consulta {consulta_id}: {e}")
             self.db.actualizar_estado(consulta_id, "error", 0, f"Error: {str(e)}")
     
-    def _process_single_objective(self, consulta_id: str, objetivo: ObjetivoBusqueda, directorio_destino: Path, query_dict: Dict, idx: int, total: int) -> Optional[tuple[Path, List[Path]]]:
-        """
-        Helper function to process a single objective, to be run in a thread pool.
-        Returns (found_file_path, list_of_recovered_files) or None if not found/processed.
-        """
-        archivo_encontrado = self._buscar_archivo_para_objetivo(objetivo)
-        if archivo_encontrado:
-            try:
-                # Pasamos el ID y el progreso para poder actualizar el estado desde dentro
-                progreso_actual = 20 + int(((idx + 1) / total) * 60)
-                nuevos_archivos = self._recuperar_archivo(consulta_id, progreso_actual, archivo_encontrado, directorio_destino, query_dict)
-                return archivo_encontrado, nuevos_archivos
-            except Exception as e:
-                self.logger.error(f"❌ No se pudo procesar {archivo_encontrado}: {e}")
-                return archivo_encontrado, [] # Indicate it was found but failed to process
-        self.logger.warning(f"⚠️ No se encontró archivo local para '{objetivo.patron_busqueda}' en '{objetivo.directorio_semana}'")
-        return None
-
     def _get_sat_code_for_date(self, satellite_name: str, request_date: datetime) -> str:
         """
         Determina el código de satélite (G16, G19, etc.) basado en el nombre operacional
@@ -199,94 +148,6 @@ class RecoverFiles:
         
         return satellite_name # Fallback
 
-    def _generar_objetivos_de_busqueda(self, query_dict: Dict) -> List['RecoverFiles.ObjetivoBusqueda']:
-        """
-        Genera una lista de todos los archivos que *deberían* existir según la consulta.
-        """
-        objetivos = []
-        satelite = query_dict.get('satelite', 'GOES-16')
-        sensor = query_dict.get('sensor', 'abi')
-        nivel = query_dict.get('nivel', 'unknown')
-        dominio = query_dict.get('dominio', 'fd')
-
-        # Construir la ruta base de la consulta, incluyendo sensor, nivel y dominio.
-        base_path = self.source_data_path
-        for key in ['sensor', 'nivel', 'dominio']:
-            if query_dict.get(key):
-                # Forzar a minúsculas para coincidir con la estructura de directorios en Linux
-                base_path /= query_dict[key].lower()
-
-        for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
-            año = fecha_jjj[:4]
-            dia_del_año_int = int(fecha_jjj[4:])
-            # Corregir el cálculo de la semana para que coincida con la fórmula de 
-            # bash: ((jday-1)/7 + 1) aunque es incorrecta, pero así está en depot.
-            # Se resta 1 para un índice base 0 antes de dividir.
-            semana = (dia_del_año_int - 1) // 7 + 1
-
-            # La ruta base ya incluye sensor/nivel/dominio, ahora añadimos año/semana
-            directorio_semana = base_path / año / f"{semana:02d}"
-
-            fecha_dt = datetime.strptime(fecha_jjj, "%Y%j")
-
-            for horario_str in horarios_list:
-                partes = horario_str.split('-') # Se re-añade este bloque
-                inicio_str, fin_str = partes[0], partes[1] if len(partes) > 1 else partes[0]
-                inicio_dt = fecha_dt.replace(hour=int(inicio_str[:2]), minute=int(inicio_str[3:])) # Se re-añade este bloque
-                fin_dt = fecha_dt.replace(hour=int(fin_str[:2]), minute=int(fin_str[3:])) # Se re-añade este bloque
-                current_dt = inicio_dt # Se re-añade este bloque
-                while current_dt <= fin_dt:
-                    # Re-introducir el filtro de minutos basado en el dominio para generar
-                    # solo los objetivos que tienen probabilidad de existir.
-                    # FD (Full Disk) genera cada 10 minutos (00, 10, 20...).
-                    # CONUS genera cada 5 minutos (en los minutos que terminan en 1 o 6).
-                    # Como fallback, si el dominio no es ninguno de estos, se asume cada 10 min.
-                    
-                    should_generate = False
-                    # Para productos L2, el intervalo de minutos en el nombre del archivo puede diferir del intervalo de escaneo nominal.
-                    # Basado en los logs de S3 para ACTPF, parece que son intervalos de 10 minutos para el timestamp 's'.
-                    # Esto debería ser configurable o derivado de forma más inteligente.
-                    productos_l2_10min = ['ACTP', 'CMIP']
-                    if nivel == 'L2' and query_dict.get('productos') and any(p in query_dict['productos'] for p in productos_l2_10min):
-                        # Regla específica para ciertos productos L2: asumir intervalos de 10 minutos en el nombre del archivo
-                        should_generate = (current_dt.minute % 10 == 0)
-                    else: # Lógica por defecto basada en el dominio para otros niveles/productos
-                        if dominio == 'fd':
-                            should_generate = (current_dt.minute % 10 == 0)
-                        elif dominio == 'conus':
-                            should_generate = (current_dt.minute % 5 == 1)
-                        else: # Fallback para dominios no especificados o diferentes
-                            should_generate = (current_dt.minute % 10 == 0)
-
-                    if should_generate:
-                        # Determinar el código de satélite correcto para esta fecha específica
-                        sat_code = self._get_sat_code_for_date(satelite, current_dt)
-
-                        # Construir el timestamp sin segundos (YYYYJJJHHMM)
-                        timestamp_archivo = f"s{current_dt.strftime('%Y%j%H%M')}"
-                        # Construir el patrón de búsqueda
-                        if nivel == 'L1b' and sensor == 'abi':
-                            # Formato: OR_ABI-L1b-RadF-M6_G16_s2024123120000.tgz
-                            patron_busqueda = f"OR_{sensor.upper()}-{nivel}-RadF-M6_{sat_code}_{timestamp_archivo}"
-                        elif nivel == 'L2' and sensor == 'abi':
-                            # Para L2, el producto no está en el nombre del .tgz, pero sí el modo (M6)
-                            # Formato: OR_ABI-L2-ACMF-M6_G16_s2024123120000.tgz
-                            # Usamos un comodín para el producto: OR_ABI-L2-*-M6_G16_...
-                            patron_busqueda = f"OR_{sensor.upper()}-{nivel}-*-M6_{sat_code}_{timestamp_archivo}"
-                        else:
-                            # Fallback genérico, puede ser menos preciso
-                            patron_busqueda = f"OR_{sensor.upper()}-{nivel}-*_{sat_code}_{timestamp_archivo}"
-
-                        # La fecha original para la reconstrucción de fallos es la clave YYYYJJJ del bucle actual.
-                        # El horario original es el rango o valor que estamos iterando.
-                        objetivos.append(self.ObjetivoBusqueda(
-                            directorio_semana=directorio_semana,
-                            patron_busqueda=patron_busqueda,
-                            fecha_original=fecha_jjj, # Usamos la fecha juliana
-                            horario_original=horario_str
-                        ))
-                    current_dt += timedelta(minutes=1)
-        return objetivos
     def _buscar_archivo_para_objetivo(self, objetivo: ObjetivoBusqueda) -> Optional[Path]:
         """Busca en disco un archivo que coincida con el patrón del objetivo."""
         if not objetivo.directorio_semana.exists():
