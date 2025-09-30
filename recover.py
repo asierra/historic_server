@@ -194,9 +194,18 @@ class RecoverFiles:
                     # Re-introducir el filtro de minutos basado en el dominio para generar
                     # solo los objetivos que tienen probabilidad de existir.
                     # FD (Full Disk) genera cada 10 minutos (00, 10, 20...).
-                    # CONUS genera cada 5 minutos (en los minutos 01, 06, 11...).
-                    if (dominio == 'fd' and current_dt.minute % 10 == 0) or \
-                       (dominio == 'conus' and current_dt.minute % 5 == 1):
+                    # CONUS genera cada 5 minutos (en los minutos que terminan en 1 o 6).
+                    # Como fallback, si el dominio no es ninguno de estos, se asume cada 10 min.
+                    
+                    should_generate = False
+                    if dominio == 'fd':
+                        should_generate = (current_dt.minute % 10 == 0)
+                    elif dominio == 'conus':
+                        should_generate = (current_dt.minute % 5 == 1)
+                    else: # Fallback para dominios no especificados o diferentes
+                        should_generate = (current_dt.minute % 10 == 0)
+
+                    if should_generate:
                         # Determinar el código de satélite correcto para esta fecha específica
                         sat_code = self._get_sat_code_for_date(satelite, current_dt)
 
