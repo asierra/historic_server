@@ -98,10 +98,10 @@ class RecoverFiles:
             self.logger.info(f"🔎 Se identificaron {len(objetivos)} archivos potenciales en total.")
 
             # 3. Escanear archivos existentes para reanudar el trabajo
-            lustre_recuperados, objetivos_pendientes = _scan_existing_files(objetivos, directorio_destino)
+            objetivos_pendientes = _scan_existing_files(objetivos, directorio_destino)
             total_objetivos_pendientes = len(objetivos_pendientes)
             
-            if not objetivos_pendientes and lustre_recuperados:
+            if not objetivos_pendientes: # If no pending objectives, all are recovered
                 self.logger.info("👍 No hay objetivos pendientes, todos los archivos ya fueron recuperados.")
             
             self.db.actualizar_estado(consulta_id, "procesando", 20, f"Identificados {total_objetivos_pendientes} archivos pendientes de procesar.")
@@ -109,6 +109,7 @@ class RecoverFiles:
             objetivos_fallidos = []
 
             # 4. Procesar cada objetivo PENDIENTE en paralelo
+            newly_recovered_from_lustre = [] # Collect files recovered in this run
             if objetivos_pendientes:
                 # Ya no usamos 'with', usamos el executor global
                 future_to_objetivo = {
@@ -125,7 +126,7 @@ class RecoverFiles:
                     try:
                         result = future.result() # (found_file_path, list_of_recovered_files)
                         if result and result[0]: # If file was found and processed
-                            lustre_recuperados.extend(result[1])
+                            newly_recovered_from_lustre.extend(result[1])
                         else: # File not found or error during processing
                             objetivos_fallidos.append(objetivo)
                     except Exception as e: # Catch exceptions from _process_single_objective
@@ -143,8 +144,11 @@ class RecoverFiles:
                 s3_recuperados = []
 
             # 6. Generar reporte final
+            # Scan the destination directory for all files (newly recovered + already existing)
+            all_files_in_destination = [f for f in directorio_destino.iterdir() if f.is_file()]
             self.db.actualizar_estado(consulta_id, "procesando", 95, "Generando reporte final")
-            resultados_finales = self._generar_reporte_final(consulta_id, lustre_recuperados, s3_recuperados, directorio_destino, objetivos_fallidos, query_dict)
+            # Pass all_files_in_destination to the report generator, it will classify them.
+            resultados_finales = self._generar_reporte_final(consulta_id, all_files_in_destination, s3_recuperados, directorio_destino, objetivos_fallidos, query_dict)
             self.db.guardar_resultados(consulta_id, resultados_finales)
 
             self.logger.info(f"✅ Procesamiento completado para {consulta_id}")
@@ -365,9 +369,11 @@ class RecoverFiles:
 
         return archivos_recuperados
 
-    def _generar_reporte_final(self, consulta_id: str, lustre_recuperados: List[Path], s3_recuperados: List[Path], directorio_destino: Path, objetivos_fallidos: List[ObjetivoBusqueda], query_original: Dict) -> Dict:
+    def _generar_reporte_final(self, consulta_id: str, all_files_in_destination: List[Path], s3_recuperados: List[Path], directorio_destino: Path, objetivos_fallidos: List[ObjetivoBusqueda], query_original: Dict) -> Dict:
         """Genera el diccionario de resultados finales."""
-        todos_los_archivos = lustre_recuperados + s3_recuperados
+        # Separate files from Lustre and S3 based on their origin (S3 recovered files are explicitly tracked)
+        lustre_files_for_report = [f for f in all_files_in_destination if f not in s3_recuperados]
+        todos_los_archivos = all_files_in_destination # Total files are all files found in the destination
         total_bytes = sum(f.stat().st_size for f in todos_los_archivos if f.is_file())
         tamaño_mb = round(total_bytes / (1024 * 1024), 2)
 
@@ -400,8 +406,8 @@ class RecoverFiles:
         return {
             "fuentes": {
                 "lustre": {
-                    "archivos": [f.name for f in lustre_recuperados],
-                    "total": len(lustre_recuperados)
+                    "archivos": [f.name for f in lustre_files_for_report],
+                    "total": len(lustre_files_for_report)
                 },
                 "s3": {
                     "archivos": [f.name for f in s3_recuperados],
