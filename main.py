@@ -213,6 +213,33 @@ async def validar_solicitud(request_data: Dict[str, Any] = Body(...)):
         # Relanzar excepciones HTTP que ya vienen preparadas (ej. 422 de Pydantic)
         raise e
 
+@app.post("/query/{consulta_id}/restart")
+async def reiniciar_consulta(consulta_id: str, background_tasks: BackgroundTasks):
+    """
+    ✅ ENDPOINT DE RECUPERACIÓN: Reinicia una consulta que se quedó atascada.
+    Busca una consulta existente y la vuelve a encolar para su procesamiento.
+    Es útil si el servidor se reinició o un proceso de fondo falló.
+    """
+    consulta = db.obtener_consulta(consulta_id)
+    if not consulta:
+        raise HTTPException(status_code=404, detail="Consulta no encontrada.")
+
+    # Solo permitir reiniciar consultas que no estén ya completadas o recién recibidas.
+    if consulta["estado"] not in ["procesando", "error"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No se puede reiniciar una consulta en estado '{consulta['estado']}'. Solo se permiten 'procesando' o 'error'."
+        )
+
+    # Volver a encolar la tarea usando la query original guardada en la DB
+    query_dict = consulta["query"]
+    background_tasks.add_task(recover.procesar_consulta, consulta_id, query_dict)
+
+    return {
+        "success": True,
+        "message": f"La consulta '{consulta_id}' ha sido reenviada para su procesamiento."
+    }
+
 @app.get("/query/{consulta_id}")
 async def obtener_consulta(
     consulta_id: str,

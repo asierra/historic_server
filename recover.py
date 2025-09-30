@@ -40,7 +40,7 @@ class RecoverFiles:
     # --- Constantes de Configuración de Satélites ---
     # TODO: Actualizar esta fecha con la fecha oficial en que GOES-19 se vuelve operacional como GOES-EAST.
     # Se asume que la fecha está en UTC.
-    GOES19_OPERATIONAL_DATE = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    GOES19_OPERATIONAL_DATE = datetime(2025, 4, 1, tzinfo=timezone.utc)
 
     # Definir la clase anidada aquí, al principio de la clase, para que esté
     # disponible para todas las anotaciones de tipo de los métodos.
@@ -52,8 +52,41 @@ class RecoverFiles:
         horario_original: str # HH:MM o HH:MM-HH:MM
 
     def procesar_consulta(self, consulta_id: str, query_dict: Dict):
+        """
+        Procesa una consulta de recuperación de archivos.
+        Esta función es idempotente: si se vuelve a ejecutar para una consulta
+        interrumpida, escaneará los archivos ya recuperados y solo procesará
+        los que falten.
+        """
+        def _scan_existing_files(objetivos: List[self.ObjetivoBusqueda], destino: Path) -> (List[Path], List[self.ObjetivoBusqueda]):
+            """
+            Escanea el directorio de destino en busca de archivos ya recuperados.
+            Devuelve una tupla: (lista_de_archivos_ya_recuperados, lista_de_objetivos_pendientes).
+            """
+            if not destino.exists():
+                return [], objetivos
+
+            self.logger.info(f"🔍 Escaneando {destino} en busca de archivos existentes...")
+            archivos_existentes = {f.name for f in destino.iterdir()}
+            objetivos_pendientes = []
+            archivos_recuperados = []
+
+            for obj in objetivos:
+                # Construimos el nombre de archivo esperado a partir del patrón
+                nombre_archivo_esperado = f"{obj.patron_busqueda}*.tgz" # Asumimos que el patrón es suficiente
+                # Esta lógica es simplificada. Asume que si un .tgz con el timestamp existe, el objetivo está completo.
+                # Una mejora sería verificar el contenido si se extrajeron archivos .nc.
+                if any(Path(f).match(nombre_archivo_esperado) for f in archivos_existentes):
+                    self.logger.debug(f"✅ Objetivo ya completado (archivo encontrado): {obj.patron_busqueda}")
+                    archivos_recuperados.append(next(destino.glob(nombre_archivo_esperado)))
+                else:
+                    objetivos_pendientes.append(obj)
+            
+            self.logger.info(f"📊 Escaneo completo. {len(archivos_recuperados)} objetivos ya recuperados, {len(objetivos_pendientes)} pendientes.")
+            return archivos_recuperados, objetivos_pendientes
+
         try:
-            self.logger.info(f"🚀 Atendiendo solicitud {consulta_id}")
+            self.logger.info(f" Atendiendo solicitud {consulta_id}")
 
             # 1. Preparar entorno
             directorio_destino = self.base_download_path / consulta_id
@@ -62,16 +95,21 @@ class RecoverFiles:
 
             # 2. Determinar todos los archivos potenciales (objetivos)
             objetivos = self._generar_objetivos_de_busqueda(query_dict)
-            total_objetivos = len(objetivos)
-            self.logger.info(f"🔎 Se buscarán {total_objetivos} archivos potenciales.")
-            self.db.actualizar_estado(consulta_id, "procesando", 20, f"Identificados {total_objetivos} archivos potenciales a buscar.")
+            self.logger.info(f"🔎 Se identificaron {len(objetivos)} archivos potenciales en total.")
 
-            # 3. Procesar cada objetivo y registrar éxitos y fracasos
-            lustre_recuperados = []
+            # 3. Escanear archivos existentes para reanudar el trabajo
+            lustre_recuperados, objetivos_pendientes = _scan_existing_files(objetivos, directorio_destino)
+            total_objetivos_pendientes = len(objetivos_pendientes)
+            
+            if not objetivos_pendientes and lustre_recuperados:
+                self.logger.info("👍 No hay objetivos pendientes, todos los archivos ya fueron recuperados.")
+            
+            self.db.actualizar_estado(consulta_id, "procesando", 20, f"Identificados {total_objetivos_pendientes} archivos pendientes de procesar.")
+
             objetivos_fallidos = []
 
-            # 3. Procesar cada objetivo en paralelo y registrar éxitos y fracasos
-            if objetivos: # Avoid division by zero if no objectives
+            # 4. Procesar cada objetivo PENDIENTE en paralelo
+            if objetivos_pendientes:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                     # Submit tasks for each objective
                     future_to_objetivo = {
@@ -81,8 +119,8 @@ class RecoverFiles:
 
                     for i, future in enumerate(concurrent.futures.as_completed(future_to_objetivo)):
                         objetivo = future_to_objetivo[future]
-                        # El progreso para la recuperación local va del 20% al 80%
-                        progreso = 20 + int(((i + 1) / total_objetivos) * 60)
+                        # El progreso se calcula sobre los objetivos pendientes
+                        progreso = 20 + int(((i + 1) / total_objetivos_pendientes) * 60)
                         self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Buscando y recuperando archivo {i+1}/{total_objetivos}")
 
                         try:
@@ -95,7 +133,7 @@ class RecoverFiles:
                             self.logger.error(f"❌ Error procesando objetivo {objetivo.patron_busqueda}: {e}")
                             objetivos_fallidos.append(objetivo)
 
-            # 3.5 (Opcional) Intentar recuperar los fallidos desde S3
+            # 5. (Opcional) Intentar recuperar los fallidos desde S3
             if self.s3_fallback_enabled and objetivos_fallidos:
                 self.db.actualizar_estado(consulta_id, "procesando", 85, f"Intentando recuperar {len(objetivos_fallidos)} archivos faltantes desde S3.")
                 s3_recuperados, objetivos_fallidos_final = self._recuperar_fallidos_desde_s3(
@@ -105,7 +143,7 @@ class RecoverFiles:
             else:
                 s3_recuperados = []
 
-            # 4. Generar reporte final
+            # 6. Generar reporte final
             self.db.actualizar_estado(consulta_id, "procesando", 95, "Generando reporte final")
             resultados_finales = self._generar_reporte_final(lustre_recuperados, s3_recuperados, directorio_destino, objetivos_fallidos, query_dict)
             self.db.guardar_resultados(consulta_id, resultados_finales)
@@ -129,8 +167,7 @@ class RecoverFiles:
             except Exception as e:
                 self.logger.error(f"❌ No se pudo procesar {archivo_encontrado}: {e}")
                 return archivo_encontrado, [] # Indicate it was found but failed to process
-        self.logger.warning(f"⚠️ No se encontró archivo local para el objetivo: {objetivo.patron_busqueda}")
-        self.logger.warning(f"⚠️ No se encontró archivo local para el objetivo: {objetivo.patron_busqueda} en la ruta: {objetivo.directorio_semana}")
+        self.logger.warning(f"⚠️ No se encontró archivo local para '{objetivo.patron_busqueda}' en '{objetivo.directorio_semana}'")
         return None
 
     def _get_sat_code_for_date(self, satellite_name: str, request_date: datetime) -> str:
@@ -213,9 +250,16 @@ class RecoverFiles:
                         timestamp_archivo = f"s{current_dt.strftime('%Y%j%H%M')}"
                         # Construir el patrón de búsqueda
                         if nivel == 'L1b' and sensor == 'abi':
-                            patron_busqueda = f"{sensor.upper()}-{nivel}-RadF-M6_{sat_code}-{timestamp_archivo}.tgz"
+                            # Formato: OR_ABI-L1b-RadF-M6_G16_s2024123120000.tgz
+                            patron_busqueda = f"OR_{sensor.upper()}-{nivel}-RadF-M6_{sat_code}_{timestamp_archivo}"
+                        elif nivel == 'L2' and sensor == 'abi':
+                            # Para L2, el producto no está en el nombre del .tgz, pero sí el modo (M6)
+                            # Formato: OR_ABI-L2-ACMF-M6_G16_s2024123120000.tgz
+                            # Usamos un comodín para el producto: OR_ABI-L2-*-M6_G16_...
+                            patron_busqueda = f"OR_{sensor.upper()}-{nivel}-*-M6_{sat_code}_{timestamp_archivo}"
                         else:
-                            patron_busqueda = f"{sensor.upper()}-{nivel}-*-{sat_code}-{timestamp_archivo}.tgz"
+                            # Fallback genérico, puede ser menos preciso
+                            patron_busqueda = f"OR_{sensor.upper()}-{nivel}-*_{sat_code}_{timestamp_archivo}"
 
                         # La fecha original para la reconstrucción de fallos es la clave YYYYJJJ del bucle actual.
                         # El horario original es el rango o valor que estamos iterando.
@@ -228,25 +272,22 @@ class RecoverFiles:
                     current_dt += timedelta(minutes=1)
         return objetivos
     def _buscar_archivo_para_objetivo(self, objetivo: ObjetivoBusqueda) -> Optional[Path]:
-        """
-        Busca en disco un archivo que coincida con el timestamp del objetivo.
-        Este método es más robusto que un glob directo, ya que solo busca la parte
-        del timestamp en el nombre del archivo.
-        """
+        """Busca en disco un archivo que coincida con el patrón del objetivo."""
         if not objetivo.directorio_semana.exists():
             return None
         
         # Extraer el timestamp del patrón de búsqueda (ej. 's20252462220')
         try:
-            timestamp_part = objetivo.patron_busqueda.split('-s')[1].split('.')[0]
-            search_str = f"-s{timestamp_part}"
+            # Construir un patrón glob que sea específico pero flexible
+            # Ejemplo: OR_ABI-L1b-RadF-M6_G16_s20241231200 -> *-s20241231200*.tgz
+            # El patrón de búsqueda ya contiene el timestamp, solo añadimos comodines y extensión.
+            glob_pattern = f"{objetivo.patron_busqueda}*.tgz"
+            
+            # find() es un generador, next() obtiene el primer elemento o None
+            return next(objetivo.directorio_semana.glob(glob_pattern), None)
         except IndexError:
-            return None # Patrón de búsqueda inválido
-
-        for f in objetivo.directorio_semana.glob('*.tgz'):
-            if search_str in f.name:
-                return f # Devolver la primera coincidencia
-        return None
+            self.logger.error(f"Patrón de búsqueda inválido, no se pudo extraer el timestamp: {objetivo.patron_busqueda}")
+            return None
 
     def _recuperar_archivo(self, archivo_fuente: Path, directorio_destino: Path, query_dict: Dict) -> List[Path]:
         """
@@ -301,6 +342,11 @@ class RecoverFiles:
                     tar.extractall(path=directorio_destino, members=miembros_a_extraer) # También puede lanzar errores
                     for miembro in miembros_a_extraer:
                         archivos_recuperados.append(directorio_destino / miembro.name)
+                
+                # Si se pidió extracción pero no se encontró ningún miembro, es un fallo.
+                if not miembros_a_extraer:
+                    raise FileNotFoundError(f"No se encontraron archivos internos que coincidieran con la solicitud en {archivo_fuente.name}")
+
         except (tarfile.ReadError, tarfile.ExtractError, FileNotFoundError) as e:
             # Capturamos errores específicos de lectura/extracción (archivos corruptos/incompletos)
             # y relanzamos la excepción para que el objetivo se marque como fallido.
