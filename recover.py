@@ -19,7 +19,7 @@ class RecoverFiles:
     """
     def __init__(self, db: ConsultasDatabase,
         source_data_path: str = "/depot/goes16", base_download_path: str = "/data/tmp",
-        s3_fallback_enabled: bool = True, executor: concurrent.futures.ThreadPoolExecutor = None):
+        s3_fallback_enabled: bool = True, executor: concurrent.futures.ProcessPoolExecutor = None):
         self.db = db
         self.source_data_path = Path(source_data_path)
         self.base_download_path = Path(base_download_path)
@@ -121,7 +121,7 @@ class RecoverFiles:
             if archivos_pendientes_local:
                 # Ya no usamos 'with', usamos el executor global
                 future_to_objetivo = {
-                    self.executor.submit(self._process_single_file_wrapper, consulta_id, 0, archivo_a_procesar, directorio_destino, query_dict): (archivo_a_procesar, time.time())
+                    self.executor.submit(process_single_file_wrapper_process_safe, consulta_id, 0, archivo_a_procesar, directorio_destino, query_dict, self.db.db_path): (archivo_a_procesar, time.time())
                     for i, archivo_a_procesar in enumerate(archivos_pendientes_local)
                 }
                 
@@ -181,6 +181,29 @@ class RecoverFiles:
         except Exception as e:
             self.logger.error(f"❌ Error procesando consulta {consulta_id}: {e}")
             self.db.actualizar_estado(consulta_id, "error", 0, f"Error: {str(e)}")
+
+# --- Funciones a nivel de módulo para ProcessPoolExecutor ---
+# ProcessPoolExecutor requiere que las funciones que se ejecutan en otros procesos
+# estén definidas a nivel superior del módulo, no como métodos de una clase.
+
+def process_single_file_wrapper_process_safe(consulta_id: str, progreso: int, archivo_fuente: Path, directorio_destino: Path, query_dict: Dict, db_path: str):
+    """
+    Función segura para procesos que envuelve la lógica de procesamiento de un archivo.
+    """
+    # Cada proceso necesita su propia instancia de la base de datos.
+    db_process = ConsultasDatabase(db_path=db_path)
+    
+    try:
+        # Verificación de accesibilidad
+        archivo_fuente.stat()
+    except OSError as e:
+        logging.warning(f"⚠️ Archivo inaccesible en Lustre, se omitirá: {archivo_fuente.name}. Error: {e}")
+        raise  # Relanzar para que el bucle principal lo marque como fallo.
+
+    # Si es accesible, proceder con la recuperación.
+    # La lógica de recuperación real se mantiene en un método para reutilización,
+    # pero se llama desde esta función segura para procesos.
+    return _recuperar_archivo_process_safe(db_process, consulta_id, progreso, archivo_fuente, directorio_destino, query_dict)
     
     def _process_single_file_wrapper(self, consulta_id: str, progreso: int, archivo_fuente: Path, directorio_destino: Path, query_dict: Dict):
         """
@@ -188,9 +211,6 @@ class RecoverFiles:
         Esta es la función que se ejecuta en el ThreadPoolExecutor.
         """
         try:
-            # 1. Verificación de accesibilidad (Pre-flight Check)
-            # stat() es una llamada de bajo nivel que puede colgarse en un FS de red.
-            # El timeout en el bucle principal de procesar_consulta capturará si esto se cuelga.
             archivo_fuente.stat()
         except OSError as e:
             self.logger.warning(f"⚠️ Archivo inaccesible en Lustre, se omitirá: {archivo_fuente.name}. Error: {e}")
@@ -198,6 +218,69 @@ class RecoverFiles:
 
         # 2. Si es accesible, proceder con la recuperación.
         return self._recuperar_archivo(consulta_id, progreso, archivo_fuente, directorio_destino, query_dict)
+
+def _recuperar_archivo_process_safe(db_process: ConsultasDatabase, consulta_id: str, progreso: int, archivo_fuente: Path, directorio_destino: Path, query_dict: Dict) -> List[Path]:
+    """
+    Versión segura para procesos del método _recuperar_archivo.
+    No usa 'self' y recibe una instancia de la DB.
+    """
+    archivos_recuperados = []
+    
+    try:
+        with tarfile.open(archivo_fuente, "r:gz") as tar:
+            productos_en_tgz = set()
+            bandas_en_tgz = set()
+            miembros_del_tar = tar.getmembers()
+
+            for miembro in miembros_del_tar:
+                if miembro.isfile():
+                    if "-L2-" in miembro.name:
+                        try: productos_en_tgz.add(miembro.name.split('-L2-')[1].split('F-')[0])
+                        except IndexError: pass
+                    if "C" in miembro.name and "_" in miembro.name:
+                        try:
+                            banda = miembro.name.split('C', 1)[1].split('_', 1)[0]
+                            if banda.isdigit():
+                                bandas_en_tgz.add(banda)
+                        except IndexError: pass
+
+            nivel = query_dict.get('nivel')
+            productos_solicitados = set(query_dict.get('productos') or [])
+            bandas_solicitadas = set(query_dict.get('bandas') or [])
+
+            copiar_tgz_completo = (nivel == 'L2' and not productos_solicitados) or \
+                                  (nivel == 'L1b' and not bandas_solicitadas) or \
+                                  (nivel == 'L2' and productos_solicitados and not productos_en_tgz.issubset(productos_solicitados)) or \
+                                  (nivel == 'L1b' and bandas_solicitadas and not bandas_en_tgz.issubset(bandas_solicitadas))
+
+            if copiar_tgz_completo:
+                db_process.actualizar_estado(consulta_id, "procesando", progreso, f"Copiando (contenido mixto): {archivo_fuente.name}")
+                logging.debug(f"📦 Copiando archivo completo (contenido mixto): {archivo_fuente.name}")
+                shutil.copy(archivo_fuente, directorio_destino)
+                archivos_recuperados.append(directorio_destino / archivo_fuente.name)
+                return archivos_recuperados
+
+            miembros_a_extraer = []
+            for miembro in miembros_del_tar:
+                if any(f"-L2-{p}" in miembro.name for p in productos_solicitados) or \
+                   any(f"C{b}_" in miembro.name for b in bandas_solicitadas):
+                    miembros_a_extraer.append(miembro)
+            
+            if miembros_a_extraer:
+                db_process.actualizar_estado(consulta_id, "procesando", progreso, f"Extrayendo de: {archivo_fuente.name}")
+                logging.debug(f"🔎 Extrayendo {len(miembros_a_extraer)} archivos de {archivo_fuente.name}")
+                tar.extractall(path=directorio_destino, members=miembros_a_extraer)
+                for miembro in miembros_a_extraer:
+                    archivos_recuperados.append(directorio_destino / miembro.name)
+            
+            if not miembros_a_extraer:
+                raise FileNotFoundError(f"No se encontraron archivos internos que coincidieran con la solicitud en {archivo_fuente.name}")
+
+    except (tarfile.ReadError, tarfile.ExtractError, FileNotFoundError) as e:
+        logging.error(f"❌ Error al procesar el archivo tar {archivo_fuente.name} (posiblemente corrupto): {e}")
+        raise
+
+    return archivos_recuperados
 
     def _discover_and_filter_files(self, query_dict: Dict) -> (List[Path], List[Path]):
         """

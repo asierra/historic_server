@@ -67,7 +67,7 @@ PROCESSOR_MODE = os.getenv("PROCESSOR_MODE", "real") # 'real' o 'simulador'
 
 # Crear un único ThreadPoolExecutor para toda la aplicación
 MAX_WORKERS = int(os.getenv("HISTORIC_MAX_WORKERS", "8"))
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
+executor = concurrent.futures.ProcessPoolExecutor(max_workers=MAX_WORKERS)
 
 # Inicializar componentes
 db = ConsultasDatabase(db_path=DB_PATH)
