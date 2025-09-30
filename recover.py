@@ -98,7 +98,7 @@ class RecoverFiles:
             self.logger.info(f"🔎 Se identificaron {len(objetivos)} archivos potenciales en total.")
 
             # 3. Escanear archivos existentes para reanudar el trabajo
-            objetivos_pendientes = _scan_existing_files(objetivos, directorio_destino)
+            archivos_recuperados, objetivos_pendientes = _scan_existing_files(objetivos, directorio_destino)
             total_objetivos_pendientes = len(objetivos_pendientes)
             
             if not objetivos_pendientes: # If no pending objectives, all are recovered
