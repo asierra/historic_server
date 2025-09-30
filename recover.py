@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from pebble import ProcessPool
 from concurrent.futures import TimeoutError
+import s3fs
 
 from database import ConsultasDatabase
 
@@ -492,7 +493,6 @@ class RecoverFiles(RecoverFiles): # Re-abrir la clase para añadir los métodos
         Intenta descargar desde S3 los archivos que no se encontraron localmente.
         """
         from botocore.config import Config
-        import s3fs
         # Configurar timeouts para el cliente S3 para evitar que se quede colgado indefinidamente.
         # connect_timeout: tiempo para establecer la conexión.
         # read_timeout: tiempo de espera para recibir datos una vez conectado.
