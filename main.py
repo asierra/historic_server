@@ -13,6 +13,7 @@ import uvicorn
 import os # Importar os para leer variables de entorno
 import secrets
 import string
+import concurrent.futures
 
 # --- Configuración de Logging ---
 # Configura el logging para escribir en un archivo en un entorno de producción.
@@ -46,17 +47,22 @@ DOWNLOAD_PATH = os.getenv("HISTORIC_DOWNLOAD_PATH", "/data/tmp")
 # Selección del procesador de background mediante variable de entorno
 PROCESSOR_MODE = os.getenv("PROCESSOR_MODE", "real") # 'real' o 'simulador'
 
+# Crear un único ThreadPoolExecutor para toda la aplicación
+MAX_WORKERS = int(os.getenv("HISTORIC_MAX_WORKERS", "8"))
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
+
 # Inicializar componentes
 db = ConsultasDatabase(db_path=DB_PATH)
 processor = HistoricQueryProcessor()
 
 # Instanciar el procesador de background según el modo
 if PROCESSOR_MODE == "real":
+    # Pasamos el executor compartido al constructor de RecoverFiles
     recover = RecoverFiles(
         db=db,
         source_data_path=SOURCE_DATA_PATH,
         base_download_path=DOWNLOAD_PATH,
-        max_workers=int(os.getenv("HISTORIC_MAX_WORKERS", "8"))
+        executor=executor
     )
 else:
     recover = BackgroundSimulator(db)
@@ -65,6 +71,16 @@ else:
 def generar_id_consulta() -> str:
     return ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
 
+@app.on_event("shutdown")
+def shutdown_event():
+    """
+    Maneja el apagado controlado. Le dice al executor que espere a que las
+    tareas de fondo terminen antes de que el servidor se apague.
+    """
+    logging.info("⏳ Servidor recibiendo señal de apagado...")
+    logging.info("   Esperando a que las tareas de fondo se completen...")
+    executor.shutdown(wait=True)
+    logging.info("✅ Todas las tareas de fondo han finalizado. Servidor apagado.")
 
 @app.get("/")
 async def health_check():

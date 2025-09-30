@@ -19,14 +19,14 @@ class RecoverFiles:
     """
     def __init__(self, db: ConsultasDatabase,
         source_data_path: str = "/depot/goes16", base_download_path: str = "/data/tmp",
-        s3_fallback_enabled: bool = True, max_workers: int = 8):
+        s3_fallback_enabled: bool = True, executor: concurrent.futures.ThreadPoolExecutor = None):
         self.db = db
         self.source_data_path = Path(source_data_path)
         self.base_download_path = Path(base_download_path)
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"📂 Inicializando RecoverFiles.")
-        self.max_workers = max_workers
-        self.logger.info(f"   - Max workers para I/O paralelo: {self.max_workers}")
+        self.executor = executor
+        self.logger.info(f"   - Usando executor compartido con max_workers={executor._max_workers}")
         self.logger.info(f"   - Origen de datos (Lustre): {self.source_data_path}")
         self.logger.info(f"   - Directorio de descargas: {self.base_download_path}")
         self.logger.info(f"   - Fallback a S3: {'Activado' if s3_fallback_enabled else 'Desactivado'}")
@@ -110,34 +110,33 @@ class RecoverFiles:
 
             # 4. Procesar cada objetivo PENDIENTE en paralelo
             if objetivos_pendientes:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                    # Submit tasks for each objective
-                    future_to_objetivo = {
-                        executor.submit(self._process_single_objective, objetivo, directorio_destino, query_dict): objetivo
-                        for objetivo in objetivos
-                    }
+                # Ya no usamos 'with', usamos el executor global
+                future_to_objetivo = {
+                    self.executor.submit(self._process_single_objective, consulta_id, objetivo, directorio_destino, query_dict, i, total_objetivos_pendientes): (objetivo, i)
+                    for objetivo in objetivos_pendientes # ¡Importante! Solo procesar los pendientes
+                }
 
-                    for i, future in enumerate(concurrent.futures.as_completed(future_to_objetivo)):
-                        objetivo = future_to_objetivo[future]
-                        # El progreso se calcula sobre los objetivos pendientes
-                        progreso = 20 + int(((i + 1) / total_objetivos_pendientes) * 60)
-                        self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Buscando y recuperando archivo {i+1}/{total_objetivos}")
+                for i, future in enumerate(concurrent.futures.as_completed(future_to_objetivo)):
+                    objetivo = future_to_objetivo[future]
+                    # El progreso se calcula sobre los objetivos pendientes
+                    progreso = 20 + int(((i + 1) / total_objetivos_pendientes) * 60)
+                    self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Buscando y recuperando archivo {i+1}/{total_objetivos_pendientes}")
 
-                        try:
-                            result = future.result() # (found_file_path, list_of_recovered_files)
-                            if result and result[0]: # If file was found and processed
-                                lustre_recuperados.extend(result[1])
-                            else: # File not found or error during processing
-                                objetivos_fallidos.append(objetivo)
-                        except Exception as e: # Catch exceptions from _process_single_objective
-                            self.logger.error(f"❌ Error procesando objetivo {objetivo.patron_busqueda}: {e}")
+                    try:
+                        result = future.result() # (found_file_path, list_of_recovered_files)
+                        if result and result[0]: # If file was found and processed
+                            lustre_recuperados.extend(result[1])
+                        else: # File not found or error during processing
                             objetivos_fallidos.append(objetivo)
+                    except Exception as e: # Catch exceptions from _process_single_objective
+                        self.logger.error(f"❌ Error procesando objetivo {objetivo.patron_busqueda}: {e}")
+                        objetivos_fallidos.append(objetivo)
 
             # 5. (Opcional) Intentar recuperar los fallidos desde S3
             if self.s3_fallback_enabled and objetivos_fallidos:
                 self.db.actualizar_estado(consulta_id, "procesando", 85, f"Intentando recuperar {len(objetivos_fallidos)} archivos faltantes desde S3.")
                 s3_recuperados, objetivos_fallidos_final = self._recuperar_fallidos_desde_s3(
-                    objetivos_fallidos, directorio_destino, query_dict
+                    consulta_id, objetivos_fallidos, directorio_destino, query_dict
                 )
                 objetivos_fallidos = objetivos_fallidos_final # Actualizar la lista de fallidos
             else:
@@ -145,7 +144,7 @@ class RecoverFiles:
 
             # 6. Generar reporte final
             self.db.actualizar_estado(consulta_id, "procesando", 95, "Generando reporte final")
-            resultados_finales = self._generar_reporte_final(lustre_recuperados, s3_recuperados, directorio_destino, objetivos_fallidos, query_dict)
+            resultados_finales = self._generar_reporte_final(consulta_id, lustre_recuperados, s3_recuperados, directorio_destino, objetivos_fallidos, query_dict)
             self.db.guardar_resultados(consulta_id, resultados_finales)
 
             self.logger.info(f"✅ Procesamiento completado para {consulta_id}")
@@ -154,7 +153,7 @@ class RecoverFiles:
             self.logger.error(f"❌ Error procesando consulta {consulta_id}: {e}")
             self.db.actualizar_estado(consulta_id, "error", 0, f"Error: {str(e)}")
     
-    def _process_single_objective(self, objetivo: ObjetivoBusqueda, directorio_destino: Path, query_dict: Dict) -> Optional[tuple[Path, List[Path]]]:
+    def _process_single_objective(self, consulta_id: str, objetivo: ObjetivoBusqueda, directorio_destino: Path, query_dict: Dict, idx: int, total: int) -> Optional[tuple[Path, List[Path]]]:
         """
         Helper function to process a single objective, to be run in a thread pool.
         Returns (found_file_path, list_of_recovered_files) or None if not found/processed.
@@ -162,7 +161,9 @@ class RecoverFiles:
         archivo_encontrado = self._buscar_archivo_para_objetivo(objetivo)
         if archivo_encontrado:
             try:
-                nuevos_archivos = self._recuperar_archivo(archivo_encontrado, directorio_destino, query_dict)
+                # Pasamos el ID y el progreso para poder actualizar el estado desde dentro
+                progreso_actual = 20 + int(((idx + 1) / total) * 60)
+                nuevos_archivos = self._recuperar_archivo(consulta_id, progreso_actual, archivo_encontrado, directorio_destino, query_dict)
                 return archivo_encontrado, nuevos_archivos
             except Exception as e:
                 self.logger.error(f"❌ No se pudo procesar {archivo_encontrado}: {e}")
@@ -289,7 +290,7 @@ class RecoverFiles:
             self.logger.error(f"Patrón de búsqueda inválido, no se pudo extraer el timestamp: {objetivo.patron_busqueda}")
             return None
 
-    def _recuperar_archivo(self, archivo_fuente: Path, directorio_destino: Path, query_dict: Dict) -> List[Path]:
+    def _recuperar_archivo(self, consulta_id: str, progreso: int, archivo_fuente: Path, directorio_destino: Path, query_dict: Dict) -> List[Path]:
         """
         Procesa un único archivo .tgz: lo copia o extrae su contenido según la consulta.
         Devuelve una lista de rutas de los archivos finales en el destino.
@@ -312,6 +313,7 @@ class RecoverFiles:
 
         # Si se pidieron todos los datos (bandas o productos), solo copiamos el .tgz
         if copiar_tgz_completo:
+            self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Copiando desde Lustre: {archivo_fuente.name}")
             self.logger.debug(f"📦 Copiando archivo completo: {archivo_fuente.name}")
             shutil.copy(archivo_fuente, directorio_destino)
             archivos_recuperados.append(directorio_destino / archivo_fuente.name)
@@ -338,6 +340,7 @@ class RecoverFiles:
                         miembros_a_extraer.append(miembro)
                 
                 if miembros_a_extraer:
+                    self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Extrayendo de: {archivo_fuente.name}")
                     self.logger.debug(f"🔎 Extrayendo {len(miembros_a_extraer)} archivos de {archivo_fuente.name}")
                     tar.extractall(path=directorio_destino, members=miembros_a_extraer) # También puede lanzar errores
                     for miembro in miembros_a_extraer:
@@ -355,7 +358,7 @@ class RecoverFiles:
 
         return archivos_recuperados
 
-    def _generar_reporte_final(self, lustre_recuperados: List[Path], s3_recuperados: List[Path], directorio_destino: Path, objetivos_fallidos: List[ObjetivoBusqueda], query_original: Dict) -> Dict:
+    def _generar_reporte_final(self, consulta_id: str, lustre_recuperados: List[Path], s3_recuperados: List[Path], directorio_destino: Path, objetivos_fallidos: List[ObjetivoBusqueda], query_original: Dict) -> Dict:
         """Genera el diccionario de resultados finales."""
         todos_los_archivos = lustre_recuperados + s3_recuperados
         total_bytes = sum(f.stat().st_size for f in todos_los_archivos if f.is_file())
@@ -385,7 +388,7 @@ class RecoverFiles:
             consulta_recuperacion.pop('creado_por', None)
             # Reemplazar con las fechas fallidas
             consulta_recuperacion['fechas'] = dict(fechas_recuperacion_ymd)
-            consulta_recuperacion['descripcion'] = f"Consulta de recuperación para la solicitud original {query_original.get('id')}"
+            consulta_recuperacion['descripcion'] = f"Consulta de recuperación para la solicitud original {consulta_id}"
 
         return {
             "fuentes": {
@@ -405,11 +408,19 @@ class RecoverFiles:
             "consulta_recuperacion": consulta_recuperacion
         }
 
-    def _recuperar_fallidos_desde_s3(self, objetivos_fallidos: List[ObjetivoBusqueda], directorio_destino: Path, query_dict: Dict) -> (List[Path], List[ObjetivoBusqueda]):
+    def _recuperar_fallidos_desde_s3(self, consulta_id: str, objetivos_fallidos: List[ObjetivoBusqueda], directorio_destino: Path, query_dict: Dict) -> (List[Path], List[ObjetivoBusqueda]):
         """ 
         Intenta descargar desde S3 los archivos que no se encontraron localmente.
         """
-        s3 = s3fs.S3FileSystem(anon=True)
+        # Configurar timeouts para el cliente S3 para evitar que se quede colgado indefinidamente.
+        # connect_timeout: tiempo para establecer la conexión.
+        # read_timeout: tiempo de espera para recibir datos una vez conectado.
+        s3 = s3fs.S3FileSystem(
+            anon=True, 
+            client_kwargs={
+                'config': {'connect_timeout': 10, 'read_timeout': 30}
+            }
+        )
         archivos_s3_recuperados = []
         objetivos_aun_fallidos = []
 
@@ -427,32 +438,32 @@ class RecoverFiles:
             return [], objetivos_fallidos
 
         if objetivos_fallidos:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                future_to_objetivo_s3 = {
-                    executor.submit(self._download_single_s3_objective, objetivo, directorio_destino, s3, producto_s3): objetivo
-                    for objetivo in objetivos_fallidos
-                }
+            future_to_objetivo_s3 = {
+                self.executor.submit(self._download_single_s3_objective, consulta_id, objetivo, directorio_destino, s3, producto_s3): objetivo
+                for objetivo in objetivos_fallidos
+            }
 
-                for future in concurrent.futures.as_completed(future_to_objetivo_s3):
-                    objetivo = future_to_objetivo_s3[future]
-                    try:
-                        ruta_local_destino = future.result()
-                        if ruta_local_destino:
-                            archivos_s3_recuperados.append(ruta_local_destino)
-                        else:
-                            objetivos_aun_fallidos.append(objetivo)
-                    except Exception as e:
-                        self.logger.error(f"❌ Error durante la recuperación desde S3 para el objetivo {objetivo.patron_busqueda}: {e}")
+            for future in concurrent.futures.as_completed(future_to_objetivo_s3):
+                objetivo = future_to_objetivo_s3[future]
+                try:
+                    ruta_local_destino = future.result()
+                    if ruta_local_destino:
+                        archivos_s3_recuperados.append(ruta_local_destino)
+                    else:
                         objetivos_aun_fallidos.append(objetivo)
+                except Exception as e:
+                    self.logger.error(f"❌ Error durante la recuperación desde S3 para el objetivo {objetivo.patron_busqueda}: {e}")
+                    objetivos_aun_fallidos.append(objetivo)
 
         return archivos_s3_recuperados, objetivos_aun_fallidos
 
-    def _download_single_s3_objective(self, objetivo: ObjetivoBusqueda, directorio_destino: Path, s3_client: s3fs.S3FileSystem, producto_s3: str) -> Optional[Path]:
+    def _download_single_s3_objective(self, consulta_id: str, objetivo: ObjetivoBusqueda, directorio_destino: Path, s3_client: s3fs.S3FileSystem, producto_s3: str) -> Optional[Path]:
         """Helper function to download a single S3 objective, to be run in a thread pool."""
         last_exception = None
         for attempt in range(self.S3_RETRY_ATTEMPTS):
             try:
                 # Extraer año, día juliano y hora del patrón de búsqueda
+                # El patrón es como OR_ABI-L1b-RadF-M6_G16_s202412312000
                 timestamp_str = objetivo.patron_busqueda.split('_s')[1].split('.')[0]
                 dt_obj = datetime.strptime(timestamp_str, "%Y%j%H%M%S")
                 
@@ -479,6 +490,7 @@ class RecoverFiles:
                 nombre_archivo_local = Path(archivo_s3_a_descargar).name
                 ruta_local_destino = directorio_destino / nombre_archivo_local
                 
+                self.db.actualizar_estado(consulta_id, "procesando", None, f"Descargando de S3 (Intento {attempt + 1}/{self.S3_RETRY_ATTEMPTS}): {nombre_archivo_local}")
                 self.logger.info(f"⬇️ Descargando desde S3: {archivo_s3_a_descargar} -> {ruta_local_destino} (Intento {attempt + 1}/{self.S3_RETRY_ATTEMPTS})")
                 s3_client.get(archivo_s3_a_descargar, str(ruta_local_destino))
                 return ruta_local_destino # Éxito, salir de la función
