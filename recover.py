@@ -219,7 +219,10 @@ class RecoverFiles:
         for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
             año = fecha_jjj[:4]
             dia_del_año_int = int(fecha_jjj[4:])
-            semana = dia_del_año_int // 7 + 1
+            # Corregir el cálculo de la semana para que coincida con la fórmula de 
+            # bash: ((jday-1)/7 + 1) aunque es incorrecta, pero así está en depot.
+            # Se resta 1 para un índice base 0 antes de dividir.
+            semana = (dia_del_año_int - 1) // 7 + 1
 
             # La ruta base ya incluye sensor/nivel/dominio, ahora añadimos año/semana
             directorio_semana = base_path / año / f"{semana:02d}"
