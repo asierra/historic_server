@@ -169,6 +169,12 @@ class RecoverFiles:
         # Si se especifica un dominio en la consulta, siempre debe ser parte de la ruta.
         if query_dict.get('dominio'):
              base_path /= query_dict['dominio'].lower()
+        # Para L1b, el dominio siempre es parte de la ruta.
+        # Para L2, solo se añade si no se especifican productos, ya que la
+        # estructura de directorios para productos específicos puede no incluir el dominio.
+        if query_dict.get('nivel') == 'L1b' or not query_dict.get('productos'):
+            if query_dict.get('dominio'):
+                base_path /= query_dict['dominio'].lower()
 
         for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
             año = fecha_jjj[:4]
@@ -247,46 +253,57 @@ class RecoverFiles:
         """
         archivos_recuperados = []
         
-        # Determinar si se debe copiar el .tgz completo o extraer su contenido
-        nivel = query_dict.get('nivel')
-        bandas_solicitadas = query_dict.get('bandas', [])
-        productos_solicitados = query_dict.get('productos')
-
-        copiar_tgz_completo = False
-        if nivel == 'L1b':
-            # Si se piden todas las bandas de ABI, se copia el tgz.
-            copiar_tgz_completo = len(bandas_solicitadas) == 16
-        elif nivel == 'L2':
-            # Si no se especifica una lista de productos, se asume que se quieren todos.
-            # En ese caso, se copia el tgz completo.
-            copiar_tgz_completo = not productos_solicitados
-
-        # Si se pidieron todos los datos (bandas o productos), solo copiamos el .tgz
-        if copiar_tgz_completo:
-            self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Copiando desde Lustre: {archivo_fuente.name}")
-            self.logger.debug(f"📦 Copiando archivo completo: {archivo_fuente.name}")
-            shutil.copy(archivo_fuente, directorio_destino)
-            archivos_recuperados.append(directorio_destino / archivo_fuente.name)
-            return archivos_recuperados
-        
-        # Si se pidió un subconjunto, abrir el .tgz para extraer selectivamente
         try:
             with tarfile.open(archivo_fuente, "r:gz") as tar: # Puede lanzar ReadError, etc.
-                miembros_a_extraer = []
-                for miembro in tar.getmembers():
-                    if not miembro.isfile():
-                        continue
+                # 1. Inspeccionar el contenido del .tgz para tomar una decisión informada
+                productos_en_tgz = set()
+                bandas_en_tgz = set()
+                miembros_del_tar = tar.getmembers()
 
-                    extraer = False
-                    if nivel == 'L1b':
-                        # El formato correcto del nombre de archivo interno es M[Modo]C[Banda]_, ej. M6C13_
-                        if any(f"C{banda}_" in miembro.name for banda in bandas_solicitadas):
-                            extraer = True
-                    elif nivel == 'L2':
-                        if any(f"-L2-{producto}" in miembro.name for producto in productos_solicitados):
-                            extraer = True
-                    
-                    if extraer:
+                for miembro in miembros_del_tar:
+                    if miembro.isfile():
+                        # Extraer producto L2 (ej. CMIP de -L2-CMIPF-)
+                        if "-L2-" in miembro.name:
+                            try:
+                                producto = miembro.name.split('-L2-')[1].split('F-')[0]
+                                productos_en_tgz.add(producto)
+                            except IndexError:
+                                continue
+                        # Extraer banda L1b (ej. 13 de M6C13_)
+                        if "C" in miembro.name and "_" in miembro.name:
+                             try:
+                                banda = miembro.name.split('C', 1)[1].split('_', 1)[0]
+                                if banda.isdigit():
+                                    bandas_en_tgz.add(banda)
+                             except IndexError:
+                                 continue
+
+                # 2. Decidir si copiar o extraer
+                nivel = query_dict.get('nivel')
+                productos_solicitados = set(query_dict.get('productos') or [])
+                bandas_solicitadas = set(query_dict.get('bandas') or [])
+
+                # Copiar el .tgz completo si:
+                # - No se especificaron productos/bandas (se quiere todo).
+                # - El .tgz contiene más productos/bandas de los solicitados.
+                copiar_tgz_completo = (nivel == 'L2' and not productos_solicitados) or \
+                                      (nivel == 'L1b' and not bandas_solicitadas) or \
+                                      (nivel == 'L2' and not productos_en_tgz.issubset(productos_solicitados)) or \
+                                      (nivel == 'L1b' and not bandas_en_tgz.issubset(bandas_solicitadas))
+
+                if copiar_tgz_completo:
+                    self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Copiando (contenido mixto): {archivo_fuente.name}")
+                    self.logger.debug(f"📦 Copiando archivo completo (contenido mixto): {archivo_fuente.name}")
+                    shutil.copy(archivo_fuente, directorio_destino)
+                    archivos_recuperados.append(directorio_destino / archivo_fuente.name)
+                    return archivos_recuperados
+
+                # 3. Si no, proceder con la extracción selectiva
+                miembros_a_extraer = []
+                for miembro in miembros_del_tar:
+                    # La lógica de decisión ya se hizo, aquí solo filtramos
+                    if any(f"-L2-{p}" in miembro.name for p in productos_solicitados) or \
+                       any(f"C{b}_" in miembro.name for b in bandas_solicitadas):
                         miembros_a_extraer.append(miembro)
                 
                 if miembros_a_extraer:
@@ -296,7 +313,7 @@ class RecoverFiles:
                     for miembro in miembros_a_extraer:
                         archivos_recuperados.append(directorio_destino / miembro.name)
                 
-                # Si se pidió extracción pero no se encontró ningún miembro, es un fallo.
+                # Si se pidió extracción pero no se encontró ningún miembro coincidente, es un fallo.
                 if not miembros_a_extraer:
                     raise FileNotFoundError(f"No se encontraron archivos internos que coincidieran con la solicitud en {archivo_fuente.name}")
 
