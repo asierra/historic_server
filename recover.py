@@ -191,8 +191,11 @@ class RecoverFiles:
                 inicio_str, fin_str = partes[0], partes[1] if len(partes) > 1 else partes[0]
                 
                 # Convertir a timestamps para comparación numérica
-                inicio_ts = int(f"{año}{dia_del_año_int:03d}{inicio_str.replace(':', '')}")
-                fin_ts = int(f"{año}{dia_del_año_int:03d}{fin_str.replace(':', '')}")
+                # Ajustar los timestamps para cubrir el rango horario completo.
+                # inicio_ts será el minuto 00 de la hora de inicio.
+                # fin_ts será el minuto 59 de la hora de fin.
+                inicio_ts = int(f"{año}{dia_del_año_int:03d}{inicio_str[:2]}00")
+                fin_ts = int(f"{año}{dia_del_año_int:03d}{fin_str[:2]}59")
 
                 for archivo in archivos_candidatos:
                     try:
