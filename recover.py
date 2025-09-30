@@ -19,14 +19,14 @@ class RecoverFiles:
     """
     def __init__(self, db: ConsultasDatabase,
         source_data_path: str = "/depot/goes16", base_download_path: str = "/data/tmp",
-        s3_fallback_enabled: bool = True, executor: ProcessPool = None):
+        s3_fallback_enabled: bool = True, executor: ProcessPool = None, max_workers: int = 8):
         self.db = db
         self.source_data_path = Path(source_data_path)
         self.base_download_path = Path(base_download_path)
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"📂 Inicializando RecoverFiles.")
         self.executor = executor
-        self.logger.info(f"   - Usando executor compartido con max_workers={executor._max_workers}")
+        self.logger.info(f"   - Usando executor compartido con max_workers={max_workers}")
         self.logger.info(f"   - Origen de datos (Lustre): {self.source_data_path}")
         self.logger.info(f"   - Directorio de descargas: {self.base_download_path}")
         self.logger.info(f"   - Fallback a S3: {'Activado' if s3_fallback_enabled else 'Desactivado'}")

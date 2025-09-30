@@ -84,7 +84,8 @@ if PROCESSOR_MODE == "real":
         source_data_path=SOURCE_DATA_PATH,
         base_download_path=DOWNLOAD_PATH,
         executor=executor,
-        s3_fallback_enabled=S3_FALLBACK_ENABLED
+        s3_fallback_enabled=S3_FALLBACK_ENABLED,
+        max_workers=MAX_WORKERS
     )
 else:
     recover = BackgroundSimulator(db)
