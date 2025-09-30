@@ -121,7 +121,17 @@ class RecoverFiles:
             if archivos_pendientes_local:
                 # Ya no usamos 'with', usamos el executor global
                 future_to_objetivo = {
-                    self.executor.schedule(process_single_file_wrapper_process_safe, args=(archivo_a_procesar, directorio_destino, query_dict), timeout=self.FILE_PROCESSING_TIMEOUT_SECONDS): archivo_a_procesar
+                    self.executor.schedule(
+                        process_single_file_wrapper_process_safe, 
+                        args=(
+                            archivo_a_procesar, 
+                            directorio_destino, 
+                            query_dict.get('nivel'), 
+                            query_dict.get('productos'), 
+                            query_dict.get('bandas')
+                        ), 
+                        timeout=self.FILE_PROCESSING_TIMEOUT_SECONDS
+                    ): archivo_a_procesar
                     for i, archivo_a_procesar in enumerate(archivos_pendientes_local)
                 }
                 
@@ -166,7 +176,7 @@ class RecoverFiles:
 # ProcessPoolExecutor requiere que las funciones que se ejecutan en otros procesos
 # estén definidas a nivel superior del módulo, no como métodos de una clase.
 
-def process_single_file_wrapper_process_safe(archivo_fuente: Path, directorio_destino: Path, query_dict: Dict):
+def process_single_file_wrapper_process_safe(archivo_fuente: Path, directorio_destino: Path, nivel: str, productos: List[str], bandas: List[str]):
     """
     Función segura para procesos que envuelve la lógica de procesamiento de un archivo.
     """
@@ -180,9 +190,9 @@ def process_single_file_wrapper_process_safe(archivo_fuente: Path, directorio_de
 
     # Si es accesible, proceder con la recuperación.
     # La lógica de recuperación real se mantiene en un método para reutilización,
-    return _recuperar_archivo_process_safe(archivo_fuente, directorio_destino, query_dict)
+    return _recuperar_archivo_process_safe(archivo_fuente, directorio_destino, nivel, productos, bandas)
     
-def _recuperar_archivo_process_safe(archivo_fuente: Path, directorio_destino: Path, query_dict: Dict) -> List[Path]:
+def _recuperar_archivo_process_safe(archivo_fuente: Path, directorio_destino: Path, nivel: str, productos_solicitados_list: List[str], bandas_solicitadas_list: List[str]) -> List[Path]:
     """
     Versión segura para procesos del método _recuperar_archivo.
     """
@@ -206,9 +216,8 @@ def _recuperar_archivo_process_safe(archivo_fuente: Path, directorio_destino: Pa
                                 bandas_en_tgz.add(banda)
                         except IndexError: pass
 
-            nivel = query_dict.get('nivel')
-            productos_solicitados = set(query_dict.get('productos') or [])
-            bandas_solicitadas = set(query_dict.get('bandas') or [])
+            productos_solicitados = set(productos_solicitados_list or [])
+            bandas_solicitadas = set(bandas_solicitadas_list or [])
 
             copiar_tgz_completo = (nivel == 'L2' and not productos_solicitados) or \
                                   (nivel == 'L1b' and not bandas_solicitadas) or \
