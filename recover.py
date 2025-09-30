@@ -163,9 +163,8 @@ class RecoverFiles:
         base_path /= query_dict.get('sensor', 'abi').lower()
         base_path /= query_dict.get('nivel', 'l1b').lower()
 
-        # Para L2, el dominio puede no ser parte de la ruta si se especifican productos.
-        # Esta lógica asume que los productos L2 no están en subdirectorios de dominio.
-        if query_dict.get('dominio') and not query_dict.get('productos'):
+        # Si se especifica un dominio en la consulta, siempre debe ser parte de la ruta.
+        if query_dict.get('dominio'):
              base_path /= query_dict['dominio'].lower()
 
         for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
