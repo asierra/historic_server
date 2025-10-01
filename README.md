@@ -9,27 +9,36 @@ Permitir que usuarios y sistemas externos puedan generar consultas complejas de 
 ## Características Principales
 
 *   **Procesamiento Asíncrono**: Las solicitudes se procesan en segundo plano, permitiendo manejar consultas de larga duración sin bloquear al cliente.
+*   **Paralelismo Robusto**: Utiliza un pool de procesos (`pebble.ProcessPool`) para aislar las tareas de E/S, previniendo que un error en un archivo detenga todo el lote. Incluye un mecanismo de apagado seguro (`graceful shutdown`).
 *   **Sistema de Almacenamiento Dual**:
     1.  Busca y recupera archivos eficientemente desde un sistema de archivos primario de alto rendimiento (como **Lustre**).
     2.  Implementa un mecanismo de **fallback a S3** (NOAA GOES Bucket) para recuperar archivos que no se encuentren localmente.
-*   **E/S Paralelizada**: Utiliza un pool de hilos (`ThreadPoolExecutor`) para realizar operaciones de búsqueda, copia y descarga de archivos en paralelo, maximizando el rendimiento.
 *   **Extracción Inteligente**: Es capaz de copiar archivos `.tgz` completos o extraer selectivamente su contenido (`.nc`) según los parámetros de la solicitud, optimizando el uso de disco.
-*   **Robustez**: Incluye mecanismos de reintento con backoff exponencial para operaciones de red (descargas de S3) y un manejo de errores que permite identificar archivos corruptos.
+*   **Robustez y Recuperación**:
+    *   Mecanismos de reintento con backoff exponencial para descargas de S3.
+    *   Timeouts configurables para el procesamiento de archivos, evitando procesos "zombie".
+    *   Capacidad de reiniciar consultas fallidas o atascadas a través de un endpoint (`/query/{id}/restart`).
+    *   Genera una `consulta_recuperacion` para los archivos que no se pudieron encontrar, facilitando reintentos manuales.
 *   **Reportes Detallados**: Al finalizar, genera un reporte en formato JSON que distingue los archivos recuperados desde el almacenamiento local y los descargados de S3, y provee una consulta de recuperación para los archivos que no se pudieron encontrar.
 *   **Validación Avanzada**: Sistema de validación extensible basado en Pydantic y clases de configuración por satélite.
-*   **Modo de Simulación**: Incluye un modo de `simulador` para desarrollo y pruebas sin necesidad de acceder al sistema de archivos real.
+*   **Modo de Simulación**: Incluye un modo `simulador` para desarrollo y pruebas sin necesidad de acceder al sistema de archivos real, con tasas de éxito configurables.
+*   **Monitoreo de Salud**: Endpoint `/health` que verifica el estado de la base de datos y la accesibilidad al almacenamiento primario.
 
 ## Configuración
 
 La aplicación se configura mediante variables de entorno:
 
-| Variable                 | Descripción                                                              | Valor por Defecto        |
-|--------------------------|--------------------------------------------------------------------------|--------------------------|
-| `PROCESSOR_MODE`         | Modo de operación del procesador de fondo. `'real'` o `'simulador'`.      | `real`                   |
-| `HISTORIC_DB_PATH`       | Ruta al archivo de la base de datos SQLite.                              | `consultas_goes.db`      |
-| `HISTORIC_SOURCE_PATH`   | Ruta al directorio raíz del almacenamiento primario (Lustre).            | `/depot/goes16`          |
-| `HISTORIC_DOWNLOAD_PATH` | Ruta base donde se guardarán los archivos recuperados para cada consulta.| `/data/tmp`              |
-| `HISTORIC_MAX_WORKERS`   | Número de hilos para operaciones de E/S en paralelo.                     | `8`                      |
+| Variable                        | Descripción                                                              | Valor por Defecto        |
+|---------------------------------|--------------------------------------------------------------------------|--------------------------|
+| `PROCESSOR_MODE`                | Modo de operación del procesador de fondo. `'real'` o `'simulador'`.      | `real`                   |
+| `HISTORIC_DB_PATH`              | Ruta al archivo de la base de datos SQLite.                              | `consultas_goes.db`      |
+| `HISTORIC_SOURCE_PATH`          | Ruta al directorio raíz del almacenamiento primario (Lustre).            | `/depot/goes16`          |
+| `HISTORIC_DOWNLOAD_PATH`        | Ruta base donde se guardarán los archivos recuperados para cada consulta.| `/data/tmp`              |
+| `HISTORIC_MAX_WORKERS`          | Número de procesos para operaciones de E/S en paralelo.                  | `8`                      |
+| `S3_FALLBACK_ENABLED`           | Habilita (`true`) o deshabilita (`false`) el fallback a S3.              | `true`                   |
+| `FILE_PROCESSING_TIMEOUT_SECONDS` | Tiempo máximo en segundos para procesar un archivo antes de cancelarlo.  | `120`                    |
+| `SIM_LOCAL_SUCCESS_RATE`        | Tasa de éxito (0.0-1.0) para hallazgos locales en modo simulador.        | `0.8`                    |
+| `SIM_S3_SUCCESS_RATE`           | Tasa de éxito (0.0-1.0) para descargas de S3 en modo simulador.          | `0.5`                    |
 
 ## Instalación y Ejecución
 
@@ -42,13 +51,13 @@ La aplicación se configura mediante variables de entorno:
     ```bash
     uvicorn main:app --reload
     ```
-    El servidor estará disponible en `http://localhost:8000`.
+    El servidor estará disponible en `http://127.0.0.1:8000`.
 
-4.  **Ejecutar en Producción (con Gunicorn):**
+3.  **Ejecutar en Producción (con Gunicorn):**
     Para un despliegue en servidor, se recomienda usar Gunicorn para gestionar los procesos de Uvicorn.
     ```bash
     # Ejemplo con 4 procesos de trabajo
-    gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app
+    gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:8000
     ```
     Asegúrate de configurar las variables de entorno (`PROCESSOR_MODE=real`, etc.) antes de ejecutar este comando.
 
@@ -56,6 +65,11 @@ La aplicación se configura mediante variables de entorno:
     ```bash
     pytest
     ```
+    Para ejecutar también las pruebas de integración que requieren acceso a internet (S3):
+    ```bash
+    pytest -m real_io
+    ```
+
 
 ## Uso de la API
 
