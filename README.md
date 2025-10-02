@@ -103,9 +103,10 @@ Verifica si una consulta es válida sin ejecutarla.
     "dominio": "conus",
     "bandas": ["13"],
     "fechas": {
-        "20210501": ["19:00-19:17", "20:00"]
+        "20210501": ["19:00-19:17", "20:00-22:05"]
     }
 }
+```
 
 ### 2. Crear una consulta (`POST /query`)
 
