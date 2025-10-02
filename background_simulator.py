@@ -107,7 +107,7 @@ class BackgroundSimulator():
         satelite = query_dict.get('satelite', 'GOES-16')
         sensor = query_dict.get('sensor', 'abi')
         nivel = query_dict.get('nivel', 'L1b')
-        dominio = query_dict.get('dominio') or 'fd'
+        dominio = query_dict.get('dominio') # Ahora es obligatorio
         bandas_solicitadas = query_dict.get('bandas') or []
         productos_solicitados = query_dict.get('productos') or []
         fechas_originales = query_dict.get('_original_request', {}).get('fechas', {})
@@ -159,16 +159,20 @@ class BackgroundSimulator():
         if objetivos_fallidos_final:
             fechas_fallidas = defaultdict(list)
             for obj in objetivos_fallidos_final:
-                # Encontrar la clave de fecha original (que puede ser un rango) que contiene la fecha YMD del objetivo.
                 fecha_ymd_fallida = obj["fecha_original_ymd"]
-                fecha_clave = fecha_ymd_fallida # Fallback
-                for f_key in fechas_originales.keys():
-                    if '-' in f_key and f_key.split('-')[0] <= fecha_ymd_fallida <= f_key.split('-')[1]:
-                        fecha_clave = f_key
-                    elif f_key == fecha_ymd_fallida:
-                        fecha_clave = f_key
-                if obj["horario_original"] not in fechas_fallidas[fecha_clave]: # Usar la clave original (ej. "20231027-20231028")
-                    fechas_fallidas[fecha_clave].append(obj["horario_original"])
+                horario_original_fallido = obj["horario_original"]
+
+                # Encontrar la clave de fecha original (que puede ser un rango como "20230101-20230105")
+                # que contiene la fecha YMD del objetivo fallido.
+                for fecha_key_original, horarios_list in fechas_originales.items():
+                    start_date_str = fecha_key_original.split('-')[0]
+                    end_date_str = fecha_key_original.split('-')[-1]
+                    
+                    if start_date_str <= fecha_ymd_fallida <= end_date_str:
+                        if horario_original_fallido in horarios_list:
+                            if horario_original_fallido not in fechas_fallidas[fecha_key_original]:
+                                fechas_fallidas[fecha_key_original].append(horario_original_fallido)
+                            break # Pasar al siguiente objetivo fallido
             
             # Reconstruir la consulta de recuperación
             consulta_recuperacion = query_dict.get('_original_request', {}).copy()

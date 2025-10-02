@@ -3,6 +3,7 @@ import json
 import time
 import argparse
 from typing import Dict
+from pathlib import Path
 
 def print_separator(title: str):
     """Imprime un separador visual para la salida."""
@@ -17,6 +18,7 @@ def print_response(response: requests.Response):
     except json.JSONDecodeError:
         print(f"-> Respuesta (No-JSON): {response.text}")
 
+# pa qu sirve esto
 def main(base_url: str, json_file_path: str, timeout: int, poll_interval: int, resume_id: str = None):
     """
     Función principal que envía una solicitud desde un archivo JSON y monitorea el resultado.
@@ -103,6 +105,65 @@ def main(base_url: str, json_file_path: str, timeout: int, poll_interval: int, r
     else:
         print_separator("Consulta finalizada con error")
         print("No se pueden obtener resultados.")
+
+def test_query_local_success(monkeypatch):
+    """Simula recuperación exitosa solo desde Lustre/local."""
+    monkeypatch.setattr("recover.LustreRecoverFiles.discover_and_filter_files", lambda self, q: [Path("/tmp/fake1.tgz")])
+    monkeypatch.setattr("recover.LustreRecoverFiles.scan_existing_files", lambda self, files, dest: files)
+    monkeypatch.setattr("recover._process_safe_recover_file", lambda *a, **kw: [Path("/tmp/fake1.tgz")])
+    monkeypatch.setattr("recover.S3RecoverFiles.discover_files", lambda *a, **kw: {})
+    monkeypatch.setattr("recover.S3RecoverFiles.download_files", lambda *a, **kw: ([], []))
+
+    response = client.post("/query", json=VALID_REQUEST)
+    assert response.status_code == 200
+    consulta_id = response.json()["consulta_id"]
+
+    # Polling hasta completado
+    for _ in range(10):
+        status = client.get(f"/query/{consulta_id}")
+        if status.json()["estado"] == "completado":
+            break
+        time.sleep(0.1)
+    assert status.json()["estado"] == "completado"
+
+def test_query_s3_success(monkeypatch):
+    """Simula recuperación exitosa solo desde S3."""
+    monkeypatch.setattr("recover.LustreRecoverFiles.discover_and_filter_files", lambda self, q: [])
+    monkeypatch.setattr("recover.S3RecoverFiles.discover_files", lambda self, q, d: {"fake2.tgz": "s3://bucket/fake2.tgz"})
+    monkeypatch.setattr("recover.S3RecoverFiles.filter_files_by_time", lambda self, files, f, h: files)
+    monkeypatch.setattr("recover.S3RecoverFiles.download_files", lambda self, cid, files, dest, db: ([Path("/tmp/fake2.tgz")], []))
+
+    response = client.post("/query", json=VALID_REQUEST)
+    assert response.status_code == 200
+    consulta_id = response.json()["consulta_id"]
+
+    for _ in range(10):
+        status = client.get(f"/query/{consulta_id}")
+        if status.json()["estado"] == "completado":
+            break
+        time.sleep(0.1)
+    assert status.json()["estado"] == "completado"
+
+def test_query_local_and_s3_fallback(monkeypatch):
+    """Simula recuperación mixta: algunos archivos locales, otros desde S3."""
+    # Un archivo local, uno solo en S3
+    monkeypatch.setattr("recover.LustreRecoverFiles.discover_and_filter_files", lambda self, q: [Path("/tmp/fake1.tgz"), Path("/tmp/fake2.tgz")])
+    monkeypatch.setattr("recover.LustreRecoverFiles.scan_existing_files", lambda self, files, dest: [Path("/tmp/fake1.tgz")])
+    monkeypatch.setattr("recover._process_safe_recover_file", lambda *a, **kw: [Path("/tmp/fake1.tgz")])
+    monkeypatch.setattr("recover.S3RecoverFiles.discover_files", lambda self, q, d: {"fake2.tgz": "s3://bucket/fake2.tgz"})
+    monkeypatch.setattr("recover.S3RecoverFiles.filter_files_by_time", lambda self, files, f, h: files)
+    monkeypatch.setattr("recover.S3RecoverFiles.download_files", lambda self, cid, files, dest, db: ([Path("/tmp/fake2.tgz")], []))
+
+    response = client.post("/query", json=VALID_REQUEST)
+    assert response.status_code == 200
+    consulta_id = response.json()["consulta_id"]
+
+    for _ in range(10):
+        status = client.get(f"/query/{consulta_id}")
+        if status.json()["estado"] == "completado":
+            break
+        time.sleep(0.1)
+    assert status.json()["estado"] == "completado"
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cliente para la API de solicitudes históricas.")

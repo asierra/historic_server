@@ -171,7 +171,7 @@ def _validate_and_prepare_request(request_data: Dict[str, Any]) -> (Dict[str, An
         raise ValueError(f"Sensor debe ser uno de: {config.VALID_SENSORS}")
     if not config.is_valid_level(data['nivel']):
         raise ValueError(f"Nivel debe ser uno de: {config.VALID_LEVELS}")
-    if data['dominio'] and not config.is_valid_domain(data['dominio']):
+    if not config.is_valid_domain(data['dominio']):
         raise ValueError(f"Dominio debe ser uno de: {config.VALID_DOMAINS}")
     
     data['bandas'] = config.validate_bandas(data['bandas'])

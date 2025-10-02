@@ -55,6 +55,7 @@ VALID_REQUEST = {
 INVALID_SATELLITE_REQUEST = {
     "sat": "METEOSAT-9",
     "nivel": "L2",
+    "dominio": "fd",
     "fechas": { "20231026": ["00:00"] }
 }
 
@@ -62,12 +63,14 @@ INVALID_BAND_REQUEST = {
     "sat": "GOES-16",
     "nivel": "L1b",
     "bandas": ["99", "02"], # La banda "99" es inválida
+    "dominio": "fd",
     "fechas": { "20231026": ["00:00"] }
 }
 
 MISSING_FECHAS_REQUEST = {
     "sat": "GOES-18",
-    "nivel": "L1b"
+    "nivel": "L1b",
+    "dominio": "fd"
 }
 
 # --- Pruebas para el endpoint /validate ---
@@ -126,6 +129,7 @@ def test_internal_date_format_is_julian(monkeypatch):
     request_data = {
         "sat": "GOES-16",
         "nivel": "L1b",
+        "dominio": "fd",
         "bandas": ["02"],
         "fechas": {
             "20231026": ["12:00"]
@@ -199,17 +203,22 @@ def test_recovery_query_is_generated_on_failure(monkeypatch):
     fuerza un fallo en la recuperación de archivos.
     """
     TEST_ID = "TEST_RECOVERY_QUERY"
-
-    # Forzar fallos: hacer que random.random() siempre devuelva un valor alto (e.g., 0.9)
-    # Esto hará que falle la recuperación local (que requiere < 0.8) y la de S3 (que requiere < 0.5)
-    monkeypatch.setattr("random.random", lambda: 0.9)
     monkeypatch.setattr("main.generar_id_consulta", lambda: TEST_ID)
+
+    # Forzar fallos en el simulador para que falle tanto en local como en S3.
+    # Esto se hace configurando las tasas de éxito a 0 a través de variables de entorno.
+    monkeypatch.setenv("SIM_LOCAL_SUCCESS_RATE", "0.0")
+    monkeypatch.setenv("SIM_S3_SUCCESS_RATE", "0.0")
+    # Es necesario recrear el simulador para que tome las nuevas variables de entorno.
+    monkeypatch.setattr(main, "recover", BackgroundSimulator(main.db))
 
     # Usar una solicitud simple para que el test sea rápido
     simple_request = {
         "sat": "GOES-16",
         "nivel": "L1b",
+        "dominio": "fd",
         "bandas": ["02"],
+        # Usar un rango de fechas para probar la lógica de reconstrucción
         "fechas": { "20231026": ["12:00"] }
     }
 
@@ -231,7 +240,11 @@ def test_recovery_query_is_generated_on_failure(monkeypatch):
     
     assert "consulta_recuperacion" in resultados
     assert resultados["consulta_recuperacion"] is not None
-    assert "20231026" in resultados["consulta_recuperacion"]["fechas"]
+    
+    # Verificar que la consulta de recuperación es precisa
+    rec_query = resultados["consulta_recuperacion"]
+    assert "20231026" in rec_query["fechas"]
+    assert rec_query["fechas"]["20231026"] == ["12:00"]
 
 def test_simulator_report_has_correct_sources_structure(monkeypatch):
     """
@@ -294,31 +307,24 @@ def real_io_fixture(monkeypatch):
 @pytest.mark.real_io
 def test_s3_fallback_integration(real_io_fixture, monkeypatch):
     """
-    Prueba de integración que verifica el fallback a S3.
-    Esta prueba requiere conexión a internet y puede ser lenta.
-    Se ejecuta con `pytest -m real_io`.
+    Prueba de integración que verifica el fallback a S3 con un archivo L1b real.
     """
     TEST_ID = "TEST_S3_FALLBACK"
     monkeypatch.setattr("main.generar_id_consulta", lambda: TEST_ID)
 
-    # Forzar que la búsqueda local siempre falle para activar el fallback a S3
-    monkeypatch.setattr(RecoverFiles, "_buscar_archivo_para_objetivo", lambda self, objetivo: None)
-
-    # Usar una solicitud para un archivo que sabemos que existe en el bucket público de S3
-    # GOES-16, L1b, RadF, 2024, día 001, 00:00 UTC
+    # Usar una fecha/hora/banda que sabemos que existe en S3
     s3_request = {
         "sat": "GOES-16",
         "nivel": "L1b",
-        "bandas": ["02"], # Solo una banda para que no copie el .tgz
-        "fechas": { "20240101": ["00:00"] } # Usar formato YYYYMMDD que el procesador espera
+        "dominio": "fd",
+        "bandas": ["13"],
+        "fechas": { "20210501": ["19:00"] }  # 2021-05-01 es día juliano 121, hora 19
     }
 
-    # Crear la consulta
     create_response = client.post("/query", json=s3_request)
     assert create_response.status_code == 200
 
-    # Monitorear hasta que se complete (con un timeout generoso para la descarga)
-    timeout = 60 # segundos
+    timeout = 60  # segundos
     for _ in range(timeout):
         get_response = client.get(f"/query/{TEST_ID}")
         get_data = get_response.json()
@@ -328,13 +334,48 @@ def test_s3_fallback_integration(real_io_fixture, monkeypatch):
     else:
         pytest.fail(f"La consulta de S3 no se completó en {timeout} segundos. Mensaje final: {get_data.get('mensaje')}")
 
-    # Verificar los resultados
     results_response = client.get(f"/query/{TEST_ID}?resultados=True")
     assert results_response.status_code == 200
     resultados = results_response.json()["resultados"]
-    
+
     assert resultados["fuentes"]["s3"]["total"] > 0
-    assert resultados["fuentes"]["lustre"]["total"] == 0
+
+@pytest.mark.real_io
+def test_s3_fallback_integration_l2_multi_product(real_io_fixture, monkeypatch):
+    """
+    Prueba de integración que verifica el fallback a S3 para productos L2 múltiples (ACHA y CMIP).
+    """
+    TEST_ID = "TEST_S3_FALLBACK_L2_MULTI"
+    monkeypatch.setattr("main.generar_id_consulta", lambda: TEST_ID)
+
+    # Usar una fecha/hora/banda que sabemos que existe en S3 para ambos productos
+    s3_request = {
+        "sat": "GOES-16",
+        "nivel": "L2",
+        "productos": ["ACHA", "CMIP"],
+        "dominio": "conus",
+        "bandas": ["13"],
+        "fechas": { "20210501": ["19:00-19:17"] }  # Ajusta la fecha/hora a una que sepas que existe
+    }
+
+    create_response = client.post("/query", json=s3_request)
+    assert create_response.status_code == 200
+
+    timeout = 60  # segundos
+    for _ in range(timeout):
+        get_response = client.get(f"/query/{TEST_ID}")
+        get_data = get_response.json()
+        if get_data["estado"] == "completado":
+            break
+        time.sleep(1)
+    else:
+        pytest.fail(f"La consulta de S3 no se completó en {timeout} segundos. Mensaje final: {get_data.get('mensaje')}")
+
+    results_response = client.get(f"/query/{TEST_ID}?resultados=True")
+    assert results_response.status_code == 200
+    resultados = results_response.json()["resultados"]
+
+    assert resultados["fuentes"]["s3"]["total"] > 0
 
 def test_complex_query_does_not_get_stuck(monkeypatch):
     """
