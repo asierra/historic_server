@@ -23,6 +23,8 @@ Permitir que usuarios y sistemas externos puedan generar consultas complejas de 
 *   **Validación Avanzada**: Sistema de validación extensible basado en Pydantic y clases de configuración por satélite.
 *   **Modo de Simulación**: Incluye un modo `simulador` para desarrollo y pruebas sin necesidad de acceder al sistema de archivos real, con tasas de éxito configurables.
 *   **Monitoreo de Salud**: Endpoint `/health` que verifica el estado de la base de datos y la accesibilidad al almacenamiento primario.
+*   **Filtrado Preciso por Hora y Minuto**: Permite solicitar archivos dentro de intervalos específicos de hora y minuto, tanto en almacenamiento local como en S3.
+*   **Consultas Multi-Producto y Multi-Dominio**: Soporta solicitudes que incluyan varios productos L2 y diferentes dominios (ej. `fd`, `conus`) en una sola consulta.
 
 ## Configuración
 
@@ -69,7 +71,9 @@ La aplicación se configura mediante variables de entorno:
     ```bash
     pytest -m real_io
     ```
-
+**Dependencias clave:**
+- `s3fs`: Para acceso a buckets S3 públicos de NOAA.
+- `pebble`: Para pools de procesos y threads robustos.
 
 ## Uso de la API
 
@@ -89,6 +93,19 @@ Verifica si una consulta es válida sin ejecutarla.
     }
 }
 ```
+
+**Ejemplo de Solicitud avanzada:**
+```json
+{
+    "sat": "GOES-16",
+    "nivel": "L2",
+    "productos": ["ACHA", "CMIP"],
+    "dominio": "conus",
+    "bandas": ["13"],
+    "fechas": {
+        "20210501": ["19:00-19:17", "20:00"]
+    }
+}
 
 ### 2. Crear una consulta (`POST /query`)
 
@@ -146,5 +163,8 @@ Una vez que el estado es `completado`, usa este endpoint para obtener el reporte
 *   **API (main.py)**: Construida con FastAPI, maneja las rutas, la validación inicial y delega el trabajo pesado a un procesador de fondo.
 *   **Procesador de Solicitudes (processors.py)**: Parsea y enriquece la solicitud del usuario, manejando la lógica de fechas, horarios y bandas.
 *   **Base de Datos (database.py)**: Utiliza SQLite para persistir el estado, progreso y resultados de cada consulta.
-*   **Procesador de Fondo (recover.py / background_simulator.py)**: Componente clave que se ejecuta de forma asíncrona. La implementación `real` interactúa con los sistemas de almacenamiento, mientras que la `simulador` facilita el desarrollo.
+*   **Procesador de Fondo (recover.py / s3_recover.py / background_simulator.py)**: 
+    - `recover.py`: Lógica de recuperación local (Lustre) y orquestación.
+    - `s3_recover.py`: Toda la lógica de descubrimiento y descarga desde S3, incluyendo filtrado avanzado por hora y minuto.
+    - `background_simulator.py`: Facilita el desarrollo y pruebas sin acceso a los sistemas reales.
 *   **Configuración (config.py)**: Clases que definen la lógica de validación específica para cada tipo de satélite, haciendo el sistema extensible.
