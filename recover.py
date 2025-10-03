@@ -134,7 +134,7 @@ class LustreRecoverFiles:
 
 # --- Clase principal orquestadora ---
 class RecoverFiles:
-    def __init__(self, db: ConsultasDatabase, source_data_path: str, base_download_path: str, executor, s3_fallback_enabled: Optional[bool] = None, lustre_enabled: Optional[bool] = None):
+    def __init__(self, db: ConsultasDatabase, source_data_path: str, base_download_path: str, executor, s3_fallback_enabled: Optional[bool] = None, lustre_enabled: Optional[bool] = None, max_workers: Optional[int] = None):
         self.db = db
         self.source_data_path = Path(source_data_path)
         self.base_download_path = Path(base_download_path)
@@ -147,7 +147,6 @@ class RecoverFiles:
         if lustre_enabled is not None:
             self.lustre_enabled = lustre_enabled
         else:
-            # Permite desactivar por cualquiera de dos variables
             disable_lustre_env = os.getenv("DISABLE_LUSTRE", "").lower()
             self.lustre_enabled = os.getenv("LUSTRE_ENABLED", "1") not in ("0", "false", "False") and disable_lustre_env not in ("1", "true")
 
@@ -156,6 +155,14 @@ class RecoverFiles:
         self.S3_RETRY_BACKOFF_SECONDS = 2
         self.GOES19_OPERATIONAL_DATE = datetime(2025, 4, 1, tzinfo=timezone.utc)
         self.lustre = LustreRecoverFiles(source_data_path, self.logger)
+
+        # Inicializa self.max_workers ANTES de usarla
+        self.max_workers = (
+            max_workers
+            or getattr(executor, "max_workers", None)
+            or int(os.getenv("HISTORIC_MAX_WORKERS", "4"))
+        )
+
         self.s3 = S3RecoverFiles(self.logger, self.max_workers, self.S3_RETRY_ATTEMPTS, self.S3_RETRY_BACKOFF_SECONDS)
 
     def procesar_consulta(self, consulta_id: str, query_dict: Dict):
