@@ -5,3 +5,4 @@ pebble
 s3fs
 pytest
 requests
+httpx

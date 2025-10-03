@@ -1,4 +1,4 @@
-# historic_request
+# historic_server
 
 API para la recuperación de datos históricos de satélite desde el sistema de almacenamiento masivo del LANOT.
 
@@ -53,13 +53,13 @@ La aplicación se configura mediante variables de entorno:
     ```bash
     uvicorn main:app --reload
     ```
-    El servidor estará disponible en `http://127.0.0.1:8000`.
+    El servidor estará disponible en `http://127.0.0.1:9041`.
 
 3.  **Ejecutar en Producción (con Gunicorn):**
     Para un despliegue en servidor, se recomienda usar Gunicorn para gestionar los procesos de Uvicorn.
     ```bash
     # Ejemplo con 4 procesos de trabajo
-    gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:8000
+    gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:9041
     ```
     Asegúrate de configurar las variables de entorno (`PROCESSOR_MODE=real`, etc.) antes de ejecutar este comando.
 

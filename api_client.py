@@ -167,7 +167,7 @@ def test_query_local_and_s3_fallback(monkeypatch):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cliente para la API de solicitudes históricas.")
-    parser.add_argument("base_url", help="URL base de la API (ej. http://localhost:8000).")
+    parser.add_argument("base_url", help="URL base de la API (ej. http://localhost:9041).")
     parser.add_argument("json_file", nargs='?', default=None, help="Ruta al archivo JSON de la solicitud (requerido si no se usa --resume).")
     parser.add_argument("--resume", type=str, default=None, help="ID de una consulta existente para reanudar el monitoreo.")
     parser.add_argument("--timeout", type=int, default=600, help="Tiempo máximo de espera en segundos para la consulta.")

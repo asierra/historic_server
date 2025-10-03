@@ -44,7 +44,7 @@ async def lifespan(app: FastAPI):
     logging.info("✅ Todas las tareas de fondo han finalizado. Servidor apagado.")
 
 app = FastAPI(
-    title="LANOT Historic Request",
+    title="LANOT Historic Server",
     description="API para solicitudes de datos históricos del LANOT",
     version="1.0.0",
     lifespan=lifespan
@@ -334,4 +334,4 @@ async def listar_consultas(
     }
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=9041)

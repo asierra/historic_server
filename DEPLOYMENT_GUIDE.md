@@ -1,7 +1,7 @@
 
 # Guía de Despliegue en Servidor Rocky 9
 
-Esta guía detalla los pasos necesarios para preparar un servidor con Rocky Linux 9 y desplegar la aplicación `historic_request` en un entorno de producción.
+Esta guía detalla los pasos necesarios para preparar un servidor con Rocky Linux 9 y desplegar la aplicación `historic_server` en un entorno de producción.
 
 ## Requisitos Previos
 
@@ -52,14 +52,14 @@ Clona el código de la aplicación en un directorio apropiado, como `/opt`.
 cd /opt
 
 # Clona tu repositorio (reemplaza la URL con la tuya)
-sudo git clone https://tu-repositorio.com/historic_request.git
+sudo git clone https://tu-repositorio.com/historic_server.git
 
 # Asigna la propiedad del directorio a tu usuario de despliegue
 # Reemplaza 'tu_usuario' y 'tu_grupo' con los correctos
-sudo chown -R tu_usuario:tu_grupo /opt/historic_request
+sudo chown -R tu_usuario:tu_grupo /opt/historic_server
 
 # Entra al directorio del proyecto
-cd /opt/historic_request
+cd /opt/historic_server
 ```
 
 ---
@@ -70,7 +70,7 @@ Es una práctica recomendada aislar las dependencias de tu proyecto para evitar 
 
 ```bash
 # Asegúrate de estar en el directorio raíz de tu proyecto
-cd /opt/historic_request
+cd /opt/historic_server
 
 # Crea el entorno virtual usando la versión de Python que instalaste
 python3.11 -m venv venv
@@ -99,7 +99,7 @@ Para ejecutar la aplicación, primero configura las variables de entorno y luego
 
 ```bash
 # 1. Activa el entorno virtual (si no lo está)
-source /opt/historic_request/venv/bin/activate
+source /opt/historic_server/venv/bin/activate
 
 # 2. Configura las variables de entorno para el modo de producción
 export PROCESSOR_MODE="real"
@@ -112,7 +112,7 @@ export HISTORIC_MAX_WORKERS="16" # Ajusta según los cores de tu CPU
 # El flag '-w' indica el número de procesos "worker". Una buena regla es (2 * N_CORES) + 1.
 # El flag '-k' especifica la clase de worker de Uvicorn.
 # El flag '--bind' indica en qué dirección IP y puerto escuchar.
-gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 127.0.0.1:8000
+gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 127.0.0.1:9041
 ```
 
 **Nota:** Asegúrate de que los directorios para la base de datos (`/var/data/historic_api`) y las descargas existan y tengan los permisos correctos.
@@ -125,24 +125,24 @@ Para que la aplicación se ejecute de forma persistente como un servicio del sis
 
 1.  **Crea el archivo de servicio:**
     ```bash
-    sudo nano /etc/systemd/system/historic-api.service
+    sudo nano /etc/systemd/system/historic-server.service
     ```
 
 2.  **Pega el siguiente contenido** (ajusta las rutas y el usuario si es necesario):
 
     ```ini
     [Unit]
-    Description=Gunicorn instance to serve Historic Request API
+    Description=Gunicorn instance to serve Historic Server API
     After=network.target
 
     [Service]
     User=tu_usuario
     Group=tu_grupo
-    WorkingDirectory=/opt/historic_request
+    WorkingDirectory=/opt/historic_server
     # Carga las variables de entorno desde un archivo .env
-    EnvironmentFile=/opt/historic_request/.env
+    EnvironmentFile=/opt/historic_server/.env
     
-    ExecStart=/opt/historic_request/venv/bin/gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:8000
+    ExecStart=/opt/historic_server/venv/bin/gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:9041
 
     Restart=always
 
@@ -157,13 +157,13 @@ Para que la aplicación se ejecute de forma persistente como un servicio del sis
     sudo systemctl daemon-reload
 
     # Habilita el servicio para que inicie automáticamente en el arranque
-    sudo systemctl enable historic-api.service
+    sudo systemctl enable historic-server.service
 
     # Inicia el servicio ahora mismo
-    sudo systemctl start historic-api.service
+    sudo systemctl start historic-server.service
 
     # (Opcional) Verifica el estado del servicio
-    sudo systemctl status historic-api.service
+    sudo systemctl status historic-server.service
     ```
 
 ---
@@ -179,10 +179,10 @@ Exponer Gunicorn directamente a internet no es seguro ni eficiente. Nginx debe a
 
 2.  **Crea un archivo de configuración para tu API:**
     ```bash
-    sudo nano /etc/nginx/conf.d/historic-api.conf
+    sudo nano /etc/nginx/conf.d/historic-server.conf
     ```
 
-3.  **Pega la siguiente configuración.** Esto redirige el tráfico del puerto 80 al puerto 8000 donde corre Gunicorn.
+3.  **Pega la siguiente configuración.** Esto redirige el tráfico del puerto 80 al puerto 9041 donde corre Gunicorn.
 
     ```nginx
     server {
@@ -190,7 +190,7 @@ Exponer Gunicorn directamente a internet no es seguro ni eficiente. Nginx debe a
         server_name tu_dominio.com; # O la IP del servidor
 
         location / {
-            proxy_pass http://127.0.0.1:8000;
+            proxy_pass http://127.0.0.1:9041;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
