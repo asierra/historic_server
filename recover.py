@@ -156,7 +156,7 @@ class RecoverFiles:
         self.S3_RETRY_BACKOFF_SECONDS = 2
         self.GOES19_OPERATIONAL_DATE = datetime(2025, 4, 1, tzinfo=timezone.utc)
         self.lustre = LustreRecoverFiles(source_data_path, self.logger)
-        self.s3 = S3RecoverFiles(self.logger, max_workers, self.S3_RETRY_ATTEMPTS, self.S3_RETRY_BACKOFF_SECONDS)
+        self.s3 = S3RecoverFiles(self.logger, self.max_workers, self.S3_RETRY_ATTEMPTS, self.S3_RETRY_BACKOFF_SECONDS)
 
     def procesar_consulta(self, consulta_id: str, query_dict: Dict):
         try:
