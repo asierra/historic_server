@@ -30,142 +30,54 @@ Permitir que usuarios y sistemas externos puedan generar consultas complejas de 
 
 La aplicación se configura mediante variables de entorno:
 
-| Variable                        | Descripción                                                              | Valor por Defecto        |
-|---------------------------------|--------------------------------------------------------------------------|--------------------------|
-| `PROCESSOR_MODE`                | Modo de operación del procesador de fondo. `'real'` o `'simulador'`.      | `real`                   |
-| `HISTORIC_DB_PATH`              | Ruta al archivo de la base de datos SQLite.                              | `consultas_goes.db`      |
-| `HISTORIC_SOURCE_PATH`          | Ruta al directorio raíz del almacenamiento primario (Lustre).            | `/depot/goes16`          |
-| `HISTORIC_DOWNLOAD_PATH`        | Ruta base donde se guardarán los archivos recuperados para cada consulta.| `/data/tmp`              |
-| `HISTORIC_MAX_WORKERS`          | Número de procesos para operaciones de E/S en paralelo.                  | `8`                      |
-| `S3_FALLBACK_ENABLED`           | Habilita (`true`) o deshabilita (`false`) el fallback a S3.              | `true`                   |
-| `FILE_PROCESSING_TIMEOUT_SECONDS` | Tiempo máximo en segundos para procesar un archivo antes de cancelarlo.  | `120`                    |
-| `SIM_LOCAL_SUCCESS_RATE`        | Tasa de éxito (0.0-1.0) para hallazgos locales en modo simulador.        | `0.8`                    |
-| `SIM_S3_SUCCESS_RATE`           | Tasa de éxito (0.0-1.0) para descargas de S3 en modo simulador.          | `0.5`                    |
+| Variable                        | Descripción                                                              | Valor por defecto |
+|---------------------------------|--------------------------------------------------------------------------|-------------------|
+| `PROCESSOR_MODE`                | Modo del procesador de fondo: real o simulador                          | `real`            |
+| `HISTORIC_DB_PATH`              | Ruta al archivo SQLite                                                   | `consultas_goes.db` |
+| `HISTORIC_SOURCE_PATH`          | Ruta raíz del almacenamiento primario (Lustre)                          | `/depot/goes16`    |
+| `HISTORIC_DOWNLOAD_PATH`        | Directorio de descargas por consulta                                     | `/data/tmp`        |
+| `HISTORIC_MAX_WORKERS`          | Número de procesos para E/S paralela                                    | `8`                |
+| `S3_FALLBACK_ENABLED`           | Habilita o deshabilita el fallback a S3 (true/false, 1/0)               | `true`            |
+| `LUSTRE_ENABLED`                | Habilita o deshabilita el uso de Lustre (true/false, 1/0)               | `true`            |
+| `DISABLE_LUSTRE`                | Alternativa para deshabilitar Lustre (true/false, 1/0)                  | `false`           |
+| `ENV_FILE`                      | Archivo .env a cargar al inicio                                          | `.env`            |
+| `FILE_PROCESSING_TIMEOUT_SECONDS` | Tiempo máximo por archivo (segundos)                                     | `120`            |
+| `SIM_LOCAL_SUCCESS_RATE`        | Tasa de éxito local en modo simulador (0.0–1.0)                          | `0.8`            |
+| `SIM_S3_SUCCESS_RATE`           | Tasa de éxito S3 en modo simulador (0.0–1.0)                             | `0.5`            |
 
-## Instalación y Ejecución
-
-1.  **Instalar dependencias:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-2.  **Ejecutar el servidor:**
-    ```bash
-    uvicorn main:app --reload
-    ```
-    El servidor estará disponible en `http://127.0.0.1:9041`.
-
-3.  **Ejecutar en Producción (con Gunicorn):**
-    Para un despliegue en servidor, se recomienda usar Gunicorn para gestionar los procesos de Uvicorn.
-    ```bash
-    # Ejemplo con 4 procesos de trabajo
-    gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:9041
-    ```
-    Asegúrate de configurar las variables de entorno (`PROCESSOR_MODE=real`, etc.) antes de ejecutar este comando.
-
-3.  **Ejecutar los tests:**
-    ```bash
-    pytest
-    ```
-    Para ejecutar también las pruebas de integración que requieren acceso a internet (S3):
-    ```bash
-    pytest -m real_io
-    ```
-**Dependencias clave:**
-- `s3fs`: Para acceso a buckets S3 públicos de NOAA.
-- `pebble`: Para pools de procesos y threads robustos.
-
-## Uso de la API
-
-### 1. Validar una solicitud (`POST /validate`)
-
-Verifica si una consulta es válida sin ejecutarla.
-
-**Ejemplo de Solicitud:**
-```json
-{
-    "sat": "GOES-16",
-    "nivel": "L1b",
-    "bandas": ["02", "13"],
-    "fechas": {
-        "20231026": ["00:00-01:00", "15:30"],
-        "20231027-20231028": ["23:00-23:59"]
-    }
-}
+### Perfiles de entorno (.env)
+```ini
+# .env.v1
+PROCESSOR_MODE=real
+HISTORIC_DB_PATH=/data/db/historic_v1.db
+HISTORIC_SOURCE_PATH=/depot/goes16
+HISTORIC_DOWNLOAD_PATH=/data/tmp/v1
+HISTORIC_MAX_WORKERS=8
+S3_FALLBACK_ENABLED=true
+LUSTRE_ENABLED=1
 ```
 
-**Ejemplo de Solicitud avanzada:**
-```json
-{
-    "sat": "GOES-16",
-    "nivel": "L2",
-    "productos": ["ACHA", "CMIP"],
-    "dominio": "conus",
-    "bandas": ["13"],
-    "fechas": {
-        "20210501": ["19:00-19:17", "20:00-22:05"]
-    }
-}
+Arranque con perfil:
+```bash
+ENV_FILE=.env.v1 uvicorn main:app --host 0.0.0.0 --port 9041
 ```
 
-### 2. Crear una consulta (`POST /query`)
+## Reglas de validación de bandas
+- Nivel L1B: requiere bandas (lista o "ALL").
+- Nivel L2:
+  - Productos CMI/CMIP/CMIPC: requieren bandas (lista o "ALL").
+  - Otros productos (por ejemplo ACHA): no requieren bandas; se ignoran si se envían.
 
-Envía la solicitud para ser procesada en segundo plano. Devuelve un `consulta_id`.
+## Patrones de archivos
+- L2 CMI (conus, banda 13):
+  CG_ABI-L2-CMIPC-M6C13_G16_sYYYYJJJHHMMSSS_eYYYYJJJHHMMSSS_cYYYYJJJHHMMSSS.nc
+- L2 ACHA (conus):
+  CG_ABI-L2-ACHAC-M6_G16_sYYYYJJJHHMMSSS_eYYYYJJJHHMMSSS_cYYYYJJJHHMMSSS.nc
+- L1B (ejemplo):
+  OR_ABI-L1b-RadC-M6C13_G16_sYYYYJJJHHMMSSS_eYYYYJJJHHMMSSS_cYYYYJJJHHMMSSS.nc
 
-**Respuesta:**
-```json
-{
-    "success": true,
-    "consulta_id": "aBcDeF12",
-    "estado": "recibido",
-    "resumen": { ... }
-}
+## Testing
+```bash
+pytest              # todas las pruebas
+pytest -m "not real_io"  # sin I/O real
 ```
-
-### 3. Monitorear el estado (`GET /query/{consulta_id}`)
-
-Consulta el estado y progreso de una solicitud en curso.
-
-**Respuesta:**
-```json
-{
-    "consulta_id": "aBcDeF12",
-    "estado": "procesando",
-    "progreso": 45,
-    "mensaje": "Buscando y recuperando archivo 50/112",
-    ...
-}
-```
-
-### 4. Obtener resultados (`GET /query/{consulta_id}?resultados=True`)
-
-Una vez que el estado es `completado`, usa este endpoint para obtener el reporte final.
-
-**Respuesta de ejemplo:**
-```json
-{
-    "consulta_id": "aBcDeF12",
-    "estado": "completado",
-    "resultados": {
-        "fuentes": {
-            "lustre": { "archivos": [...], "total": 110 },
-            "s3": { "archivos": [...], "total": 2 }
-        },
-        "total_archivos": 112,
-        "tamaño_total_mb": 12345.67,
-        "directorio_destino": "/data/tmp/aBcDeF12",
-        "consulta_recuperacion": { ... }
-    }
-}
-```
-
-## Arquitectura
-
-*   **API (main.py)**: Construida con FastAPI, maneja las rutas, la validación inicial y delega el trabajo pesado a un procesador de fondo.
-*   **Procesador de Solicitudes (processors.py)**: Parsea y enriquece la solicitud del usuario, manejando la lógica de fechas, horarios y bandas.
-*   **Base de Datos (database.py)**: Utiliza SQLite para persistir el estado, progreso y resultados de cada consulta.
-*   **Procesador de Fondo (recover.py / s3_recover.py / background_simulator.py)**: 
-    - `recover.py`: Lógica de recuperación local (Lustre) y orquestación.
-    - `s3_recover.py`: Toda la lógica de descubrimiento y descarga desde S3, incluyendo filtrado avanzado por hora y minuto.
-    - `background_simulator.py`: Facilita el desarrollo y pruebas sin acceso a los sistemas reales.
-*   **Configuración (config.py)**: Clases que definen la lógica de validación específica para cada tipo de satélite, haciendo el sistema extensible.

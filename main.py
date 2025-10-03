@@ -11,7 +11,7 @@ import logging
 from pydantic import ValidationError
 from config import SatelliteConfigGOES
 import uvicorn
-import os # Importar os para leer variables de entorno
+import os
 import secrets
 import string
 from pebble import ProcessPool
@@ -84,8 +84,8 @@ if PROCESSOR_MODE == "real":
         source_data_path=SOURCE_DATA_PATH,
         base_download_path=DOWNLOAD_PATH,
         executor=executor,
-        s3_fallback_enabled=S3_FALLBACK_ENABLED,
-        max_workers=MAX_WORKERS
+        s3_fallback_enabled=os.getenv("S3_FALLBACK_ENABLED", "1") not in ("0","false","False"),
+        lustre_enabled=os.getenv("LUSTRE_ENABLED", "1") not in ("0","false","False")
     )
 else:
     recover = BackgroundSimulator(db)
@@ -135,35 +135,34 @@ def _validate_and_prepare_request(request_data: Dict[str, Any]) -> (Dict[str, An
     try:
         request = HistoricQueryRequest(**request_data)
     except ValidationError as e:
-        # Pydantic genera errores detallados, los pasamos directamente.
         raise HTTPException(status_code=422, detail=e.errors())
 
-    # 2. Determinar la configuración correcta (ej. por prefijo del satélite)
+    # 2. Determinar la configuración correcta
     sat_name = request.sat or AVAILABLE_SATELLITE_CONFIGS["GOES"].DEFAULT_SATELLITE
     config = None
     if sat_name.startswith("GOES"):
         config = AVAILABLE_SATELLITE_CONFIGS["GOES"]
-    # Agrega aquí lógica para otros satélites:
-    # elif sat_name.startswith("JPSS"):
-    #     config = AVAILABLE_SATELLITE_CONFIGS["JPSS"]
 
     if not config:
         raise HTTPException(status_code=400, detail=f"Satélite '{sat_name}' no es soportado o es inválido.")
 
-    # 3. Aplicar valores por defecto y validar con la configuración específica
+    # 3. Defaults
     data = request.model_dump()
     data['sat'] = sat_name
     data['sensor'] = request.sensor or config.DEFAULT_SENSOR
     data['nivel'] = request.nivel or config.DEFAULT_LEVEL
 
-    # Lógica condicional para las bandas:
-    # Por defecto, las bandas se toman de la solicitud o se usa el valor por defecto.
-    data['bandas'] = request.bandas or config.DEFAULT_BANDAS
-    # Excepción: Si es L2 y se piden productos, las bandas NO son relevantes,
-    # a menos que uno de los productos sea 'CMIP', que sí usa bandas.
-    if data['nivel'] == 'L2' and request.productos:
-        if 'CMIP' not in request.productos:
-            data['bandas'] = None
+    # Lógica condicional para las bandas (CORREGIDA):
+    nivel_upper = (data['nivel'] or '').upper()
+    productos_upper = [str(p).strip().upper() for p in (request.productos or [])]
+    is_cmi_product = any(p.startswith('CMI') for p in productos_upper)  # acepta CMIP, CMIPC, CMI, etc.
+    requiere_bandas = (nivel_upper == 'L1B') or (nivel_upper == 'L2' and is_cmi_product)
+
+    if requiere_bandas:
+        data['bandas'] = request.bandas or config.DEFAULT_BANDAS
+    else:
+        # L2 sin productos CMI: no exigir bandas
+        data['bandas'] = []
 
     if not config.is_valid_satellite(data['sat']):
         raise ValueError(f"Satélite debe ser uno de: {config.VALID_SATELLITES}")
@@ -174,7 +173,10 @@ def _validate_and_prepare_request(request_data: Dict[str, Any]) -> (Dict[str, An
     if not config.is_valid_domain(data['dominio']):
         raise ValueError(f"Dominio debe ser uno de: {config.VALID_DOMAINS}")
     
-    data['bandas'] = config.validate_bandas(data['bandas'])
+    # Validar bandas solo cuando aplican
+    if requiere_bandas:
+        data['bandas'] = config.validate_bandas(data['bandas'])
+
     return data, config
 
 @app.post("/query")

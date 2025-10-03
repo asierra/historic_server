@@ -65,21 +65,24 @@ class SatelliteConfigGOES(SatelliteConfigBase):
         return domain in self.VALID_DOMAINS
 
     def validate_bandas(self, bandas: List[str]) -> List[str]:
-        """Valida bandas y DEVUELVE ERROR si hay bandas inválidas"""
+        """Valida bandas. Acepta lista vacía cuando no se requieren bandas."""
+        bandas = bandas or []
         if not bandas:
-            raise ValueError("La lista de bandas no puede estar vacía")
-        
+            # No exigir en este nivel; la lógica de 'requeridas' vive en main.py
+            return bandas
+
         if "ALL" in bandas:
-            return ["ALL"] # Return "ALL" to be expanded later by expand_bandas
-        
-        bandas_invalidas = [banda for banda in bandas if banda not in self.VALID_BANDAS]
+            return ["ALL"]  # expand_bandas las convertirá luego
+
+        bandas_invalidas = [b for b in bandas if b not in self.VALID_BANDAS]
         if bandas_invalidas:
             raise ValueError(f"Bandas inválidas: {bandas_invalidas}. Bandas válidas: {self.VALID_BANDAS}")
-        
+
         return bandas
 
     def expand_bandas(self, bandas: List[str]) -> List[str]:
-        """Expands the 'ALL' keyword into the full list of bands."""
+        """Expande 'ALL' o tolera lista vacía/None sin error."""
+        bandas = bandas or []
         if "ALL" in bandas:
             return self.VALID_BANDAS
         return bandas

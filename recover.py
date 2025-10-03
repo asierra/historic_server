@@ -2,7 +2,7 @@ import os
 import logging
 import shutil
 import tarfile
-from typing import List, Dict, Optional, NamedTuple
+from typing import List, Dict, Iterable, Optional
 from datetime import datetime, timezone
 from pathlib import Path
 from pebble import ProcessPool, ThreadPool
@@ -134,15 +134,23 @@ class LustreRecoverFiles:
 
 # --- Clase principal orquestadora ---
 class RecoverFiles:
-    def __init__(self, db: ConsultasDatabase,
-        source_data_path: str = "/depot/goes16", base_download_path: str = "/data/tmp",
-        s3_fallback_enabled: bool = True, executor: ProcessPool = None, max_workers: int = 8):
+    def __init__(self, db: ConsultasDatabase, source_data_path: str, base_download_path: str, executor, s3_fallback_enabled: Optional[bool] = None, lustre_enabled: Optional[bool] = None):
         self.db = db
         self.source_data_path = Path(source_data_path)
         self.base_download_path = Path(base_download_path)
         self.logger = logging.getLogger(__name__)
         self.executor = executor
-        self.s3_fallback_enabled = s3_fallback_enabled
+        self.s3_fallback_enabled = (s3_fallback_enabled
+                                    if s3_fallback_enabled is not None
+                                    else os.getenv("S3_FALLBACK_ENABLED", "1") not in ("0", "false", "False"))
+        # Nuevo flag para Lustre
+        if lustre_enabled is not None:
+            self.lustre_enabled = lustre_enabled
+        else:
+            # Permite desactivar por cualquiera de dos variables
+            disable_lustre_env = os.getenv("DISABLE_LUSTRE", "").lower()
+            self.lustre_enabled = os.getenv("LUSTRE_ENABLED", "1") not in ("0", "false", "False") and disable_lustre_env not in ("1", "true")
+
         self.FILE_PROCESSING_TIMEOUT_SECONDS = int(os.getenv("FILE_PROCESSING_TIMEOUT_SECONDS", "120"))
         self.S3_RETRY_ATTEMPTS = 3
         self.S3_RETRY_BACKOFF_SECONDS = 2
@@ -210,8 +218,26 @@ class RecoverFiles:
             # 5. Recuperar desde S3 si está habilitado
             if self.s3_fallback_enabled:
                 self.db.actualizar_estado(consulta_id, "procesando", 85, "Buscando archivos adicionales en S3.")
-                s3_map = self.s3.discover_files(query_dict, self.GOES19_OPERATIONAL_DATE)
-                archivos_candidatos_path = [Path(p) for p in s3_map.keys()]
+                # Separar productos CMI* de no-CMI para no aplicar 'bandas' a ACHA/otros
+                productos_req = (query_dict.get("productos") or [])
+                productos_upper = [str(p).strip().upper() for p in productos_req]
+                cmi_products = [p for p in productos_upper if p.startswith("CMI")]
+                other_products = [p for p in productos_upper if not p.startswith("CMI")]
+
+                s3_map = {}
+                # Consulta para CMI*: respeta 'bandas'
+                if cmi_products:
+                    q_cmi = dict(query_dict)
+                    q_cmi["productos"] = cmi_products
+                    q_cmi["bandas"] = query_dict.get("bandas") or []
+                    s3_map.update(self.s3.discover_files(q_cmi, self.GOES19_OPERATIONAL_DATE))
+                # Consulta para no-CMI: ignorar 'bandas'
+                if other_products:
+                    q_other = dict(query_dict)
+                    q_other["productos"] = other_products
+                    q_other["bandas"] = []  # explícito: no filtrar por banda
+                    s3_map.update(self.s3.discover_files(q_other, self.GOES19_OPERATIONAL_DATE))
+
                 archivos_s3_filtrados = []
                 for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
                     archivos_encontrados = [s3_map[k] for k in s3_map]
@@ -313,6 +339,80 @@ class RecoverFiles:
             "timestamp_procesamiento": datetime.now().isoformat(),
             "consulta_recuperacion": consulta_recuperacion
         }
+
+    def _producto_requiere_bandas(self, nivel: str, producto: str) -> bool:
+        n = (nivel or "").strip().upper()
+        p = (producto or "").strip().upper()
+        return n == "L1B" or (n == "L2" and p.startswith("CMI"))
+
+    def _iter_patrones_l2(
+        self,
+        productos: List[str],
+        dominio: str,
+        bandas: List[str],
+        sat_code: str,
+        ts_inicio: str,
+        ts_fin: str,
+    ) -> Iterable[str]:
+        """
+        Genera patrones de filename para L2.
+        - CMI/CMIP/CMIPC: incluye banda como M6Cdd
+        - Otros (p.ej. ACHA/ACTP): sin banda (solo M6)
+        """
+        dom_letter = "C" if dominio == "conus" else "F"
+        productos_upper = [p.strip().upper() for p in (productos or [])]
+        bandas = bandas or []
+
+        for prod in productos_upper:
+            if prod.startswith("CMI"):
+                # Si no se enviaron bandas, usa ALL (16) o deja que aguas abajo expanda.
+                iter_bandas = bandas or [f"{i:02d}" for i in range(1, 17)]
+                for b in iter_bandas:
+                    b2 = f"{int(b):02d}" if str(b).isdigit() else str(b)
+                    # Ejemplo: CG_ABI-L2-CMIPC-M6C13_G16_sYYYYJJJHHMMSS_eYYYYJJJHHMMSS_c*.nc
+                    yield f"CG_ABI-L2-{prod}{dom_letter}-M6C{b2}_{sat_code}_s{ts_inicio}_e{ts_fin}_c*.nc"
+            else:
+                # Ejemplo: CG_ABI-L2-ACHAC-M6_G16_sYYYYJJJHHMMSS_eYYYYJJJHHMMSS_c*.nc
+                yield f"CG_ABI-L2-{prod}{dom_letter}-M6_{sat_code}_s{ts_inicio}_e{ts_fin}_c*.nc"
+
+    # En donde actualmente construyes los patrones para buscar en Lustre/S3,
+    # reemplaza el bloque que usa 'bandas' para todos los productos por algo como:
+    def _construir_patrones_busqueda(self, query: Dict) -> List[str]:
+        """
+        Construye los patrones de archivo a buscar según la query.
+        """
+        nivel = (query.get("nivel") or "").upper()
+        dominio = query.get("dominio")
+        productos = query.get("productos") or []
+        sat_code = self._sat_to_code(query.get("sat"))  # asume que existe
+        ts_inicio, ts_fin = self._rangos_a_timestamps(query)  # asume que existe
+
+        patrones: List[str] = []
+
+        if nivel == "L1B":
+            # Mantén tu lógica actual para L1B con bandas
+            # ...existing code...
+            pass
+        elif nivel == "L2":
+            # USAR patrones por producto (bandas solo para CMI)
+            patrones.extend(
+                list(
+                    self._iter_patrones_l2(
+                        productos=productos,
+                        dominio=dominio,
+                        bandas=query.get("bandas") or [],
+                        sat_code=sat_code,
+                        ts_inicio=ts_inicio,
+                        ts_fin=ts_fin,
+                    )
+                )
+            )
+        else:
+            # ...existing code...
+            pass
+
+        logging.debug(f"Patrones L2 generados: {patrones}")
+        return patrones
 
 # --- Funciones a nivel de módulo para ProcessPoolExecutor ---
 # ProcessPoolExecutor requiere que las funciones que se ejecutan en otros procesos

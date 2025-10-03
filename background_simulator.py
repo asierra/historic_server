@@ -101,6 +101,20 @@ class BackgroundSimulator():
         else:
             return "rapido"
     
+    def _resolver_bandas(self, nivel: str, producto: str, bandas_solicitadas):
+        """
+        Devuelve la lista de bandas a usar para el nombre de archivo.
+        - L2 + CMI*: si no se indicó bandas -> ALL (01..16).
+        - En otros casos -> normaliza bandas_solicitadas.
+        """
+        nivel_u = (nivel or "").upper()
+        prod_u = (producto or "").upper()
+        bandas_solicitadas = bandas_solicitadas or []
+        if nivel_u == "L2" and prod_u.startswith("CMI"):
+            if not bandas_solicitadas:
+                return [f"{i:02d}" for i in range(1, 17)]
+        return [f"{int(b):02d}" if str(b).isdigit() else str(b) for b in bandas_solicitadas]
+    
     def _generar_resultados_simulados(self, consulta_id: str, query_dict: Dict) -> Dict:
         """Genera resultados simulados realistas, imitando la lógica de `RecoverFiles`."""
         # Extraer parámetros de la consulta
@@ -191,16 +205,34 @@ class BackgroundSimulator():
             # Función auxiliar para expandir nombres de .tgz a .nc
             def expandir_nombres(lista_tgz):
                 archivos_nc = []
+                dom_letter = 'C' if dominio == 'conus' else 'F'
                 for tgz_name in lista_tgz:
                     timestamp_part = tgz_name.split('_', 4)[-1].split('.')[0]
                     if nivel == 'L1b':
                         for banda in bandas_solicitadas:
-                            archivos_nc.append(f"OR_{sensor.upper()}-{nivel}-RadF-M6C{banda}_{sat_code}_{timestamp_part}_e..._c....nc")
+                            banda_str = f"{int(banda):02d}" if str(banda).isdigit() else str(banda)
+                            archivos_nc.append(
+                                f"OR_{sensor.upper()}-{nivel}-Rad{dom_letter}-M6C{banda_str}_{sat_code}_{timestamp_part}_e..._c....nc"
+                            )
                     elif nivel == 'L2':
                         for producto in productos_solicitados:
-                            archivos_nc.append(f"OR_{sensor.upper()}-{nivel}-{producto}F-M6_{sat_code}_{timestamp_part}_e..._c....nc")
+                            prod_upper = str(producto).upper()
+                            if prod_upper.startswith('CMI'):
+                                # L2 CMI: incluir banda tras M6 con patrón Cdd (ej. M6C13)
+                                product_token = f"CMIP{dom_letter}"
+                                bands = self._resolver_bandas(nivel, prod_upper, bandas_solicitadas)
+                                for banda in bands:
+                                    banda_str = f"{int(banda):02d}" if str(banda).isdigit() else str(banda)
+                                    archivos_nc.append(
+                                        f"CG_{sensor.upper()}-L2-{product_token}-M6C{banda_str}_{sat_code}_{timestamp_part}_e..._c....nc"
+                                    )
+                            else:
+                                # L2 no CMI: sin banda específica
+                                product_token = f"{prod_upper}{dom_letter}"
+                                archivos_nc.append(
+                                    f"OR_{sensor.upper()}-L2-{product_token}-M6_{sat_code}_{timestamp_part}_e..._c....nc"
+                                )
                 return archivos_nc
-            
             # Aplicar la expansión a ambas listas
             lustre_recuperados = expandir_nombres(lustre_recuperados)
             s3_recuperados = expandir_nombres(s3_recuperados)
@@ -230,4 +262,3 @@ class BackgroundSimulator():
             raise Exception(mensaje_error)
         except Exception as e:
             self.db.actualizar_estado(consulta_id, "error", 0, f"Error simulado: {str(e)}")
-    

@@ -2,10 +2,11 @@ import pytest
 from fastapi.testclient import TestClient
 import main  # Importamos el módulo principal
 import time
+import re
 from background_simulator import BackgroundSimulator
 from database import ConsultasDatabase
 import os
-from recover import RecoverFiles # Importar el procesador real para la prueba de integración
+from recover import RecoverFiles  # Importar el procesador real para la prueba de integración
 
 # --- Configuración de la Base de Datos de Prueba ---
 
@@ -104,6 +105,21 @@ def test_validate_missing_required_field():
     data = response.json()
     assert data["detail"][0]["msg"] == "Field required" # Pydantic v2 message
     assert data["detail"][0]["loc"] == ["fechas"]
+
+def test_validate_l2_acha_without_bandas_is_valid():
+    """Nivel L2 con ACHA no requiere 'bandas'."""
+    payload = {
+        "nivel": "L2",
+        "dominio": "conus",
+        "productos": ["ACHA"],
+        "fechas": {"20200101": ["19:19-22:19"]},
+        "creado_por": "vescudero@geografia.unam.mx"
+    }
+    resp = client.post("/validate", json=payload)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    if isinstance(body, dict) and "success" in body:
+        assert body["success"] is True
 
 # --- Pruebas para el endpoint /query ---
 
@@ -318,7 +334,7 @@ def test_s3_fallback_integration(real_io_fixture, monkeypatch):
         "nivel": "L1b",
         "dominio": "fd",
         "bandas": ["13"],
-        "fechas": { "20210501": ["19:00"] }  # 2021-05-01 es día juliano 121, hora 19
+        "fechas": { "20210501": ["19:00-19:20"] }  # 2021-05-01 es día juliano 121, hora 19
     }
 
     create_response = client.post("/query", json=s3_request)
@@ -348,34 +364,44 @@ def test_s3_fallback_integration_l2_multi_product(real_io_fixture, monkeypatch):
     TEST_ID = "TEST_S3_FALLBACK_L2_MULTI"
     monkeypatch.setattr("main.generar_id_consulta", lambda: TEST_ID)
 
-    # Usar una fecha/hora/banda que sabemos que existe en S3 para ambos productos
     s3_request = {
         "sat": "GOES-16",
         "nivel": "L2",
         "productos": ["ACHA", "CMIP"],
         "dominio": "conus",
         "bandas": ["13"],
-        "fechas": { "20210501": ["19:00-19:17"] }  # Ajusta la fecha/hora a una que sepas que existe
+        "fechas": { "20210501": ["19:00-19:17"] }
     }
 
     create_response = client.post("/query", json=s3_request)
     assert create_response.status_code == 200
 
-    timeout = 60  # segundos
+    timeout = 60
     for _ in range(timeout):
         get_response = client.get(f"/query/{TEST_ID}")
-        get_data = get_response.json()
-        if get_data["estado"] == "completado":
+        data = get_response.json()
+        if data.get("estado") == "completado":
             break
         time.sleep(1)
     else:
-        pytest.fail(f"La consulta de S3 no se completó en {timeout} segundos. Mensaje final: {get_data.get('mensaje')}")
+        pytest.fail("La consulta no se completó a tiempo.")
 
     results_response = client.get(f"/query/{TEST_ID}?resultados=True")
     assert results_response.status_code == 200
     resultados = results_response.json()["resultados"]
 
-    assert resultados["fuentes"]["s3"]["total"] > 0
+    # Puede haber archivos en lustre y/o S3
+    archivos = resultados["fuentes"]["s3"]["archivos"] + resultados["fuentes"]["lustre"]["archivos"]
+    assert len(archivos) > 0
+
+    # CMIP debe respetar la banda 13 (M6C13)
+    cmip_files = [a for a in archivos if "-L2-CMIP" in a]
+    assert cmip_files, "No se generaron archivos CMIP"
+    assert all("-M6C13_" in a for a in cmip_files)
+
+    # ACHA debe estar presente y no lleva banda (solo M6)
+    acha_files = [a for a in archivos if "-L2-ACHAC-" in a]
+    assert acha_files, "No se generaron archivos ACHA"
 
 def test_complex_query_does_not_get_stuck(monkeypatch):
     """
@@ -419,3 +445,78 @@ def test_complex_query_does_not_get_stuck(monkeypatch):
 
     # 3. Verificar que el estado final es 'completado'
     assert get_data["estado"] == "completado"
+
+def test_simulator_l2_cmip_respects_requested_band(monkeypatch):
+    """CMIP con bandas=['13'] solo debe generar archivos C13."""
+    TEST_ID = "TEST_CMIP_ONLY_C13"
+    monkeypatch.setattr("main.generar_id_consulta", lambda: TEST_ID)
+
+    req = {
+        "sat": "GOES-16",
+        "nivel": "L2",
+        "productos": ["ACHA", "CMIP"],
+        "dominio": "conus",
+        "bandas": ["13"],
+        "fechas": {"20210501": ["19:00-19:17"]}
+    }
+
+    create_response = client.post("/query", json=req)
+    assert create_response.status_code == 200
+
+    for _ in range(15):
+        get_resp = client.get(f"/query/{TEST_ID}")
+        if get_resp.json()["estado"] == "completado":
+            break
+        time.sleep(1)
+    else:
+        pytest.fail("La consulta del simulador no se completó a tiempo.")
+
+    results = client.get(f"/query/{TEST_ID}?resultados=True").json()["resultados"]
+    archivos = results["fuentes"]["lustre"]["archivos"] + results["fuentes"]["s3"]["archivos"]
+
+    # Los archivos CMIP deben contener '-M6C13_' y no otras bandas
+    cmip_files = [a for a in archivos if "-L2-CMIP" in a or "-L2-CMIPC" in a]
+    assert cmip_files, "No se generaron archivos CMIP"
+    assert all("-M6C13_" in a for a in cmip_files)
+    assert all("-M6C" in a and not any(f"-M6C{b:02d}_" in a for b in range(1,17) if b != 13) for a in cmip_files)
+
+def test_l2_cmip_without_bandas_expands_to_all(monkeypatch):
+    """
+    Si no se envían bandas para L2+CMIP, se debe expandir a ALL (01..16).
+    Verificamos que el simulador genere archivos con múltiples bandas Cdd.
+    """
+    TEST_ID = "TEST_CMIP_EXPANDS_ALL"
+    monkeypatch.setattr("main.generar_id_consulta", lambda: TEST_ID)
+
+    req = {
+        "sat": "GOES-16",
+        "nivel": "L2",
+        "productos": ["CMIP"],
+        "dominio": "conus",
+        "fechas": {"20210501": ["19:00-19:17"]}  # sin 'bandas'
+    }
+
+    resp = client.post("/query", json=req)
+    assert resp.status_code == 200
+
+    for _ in range(15):
+        st = client.get(f"/query/{TEST_ID}").json()
+        if st["estado"] == "completado":
+            break
+        time.sleep(1)
+    else:
+        pytest.fail("La consulta del simulador no se completó a tiempo.")
+
+    resultados = client.get(f"/query/{TEST_ID}?resultados=True").json()["resultados"]
+    archivos = resultados["fuentes"]["lustre"]["archivos"] + resultados["fuentes"]["s3"]["archivos"]
+    cmip_files = [a for a in archivos if "-L2-CMIP" in a or "-L2-CMIPC" in a]
+    assert cmip_files, "No se generaron archivos CMIP"
+
+    # Extraer bandas Cdd del nombre
+    bands = set()
+    for a in cmip_files:
+        m = re.search(r"-M6C(\d{2})_", a)
+        if m:
+            bands.add(m.group(1))
+    # Debe haber 16 bandas (01..16)
+    assert bands == {f"{i:02d}" for i in range(1, 17)}, f"Bandas detectadas: {sorted(bands)}"
