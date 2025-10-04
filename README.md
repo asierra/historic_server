@@ -62,6 +62,101 @@ Arranque con perfil:
 ENV_FILE=.env.v1 uvicorn main:app --host 0.0.0.0 --port 9041
 ```
 
+## Uso de la API
+
+### 1. Validar una solicitud (`POST /validate`)
+
+Verifica si una consulta es válida sin ejecutarla.
+
+**Ejemplo de Solicitud:**
+```json
+{
+    "sat": "GOES-16",
+    "nivel": "L1b",
+    "bandas": ["02", "13"],
+    "fechas": {
+        "20231026": ["00:00-01:00", "15:30"],
+        "20231027-20231028": ["23:00-23:59"]
+    }
+}
+```
+
+**Ejemplo de Solicitud avanzada:**
+```json
+{
+    "sat": "GOES-16",
+    "nivel": "L2",
+    "productos": ["ACHA", "CMIP"],
+    "dominio": "conus",
+    "bandas": ["13"],
+    "fechas": {
+        "20210501": ["19:00-19:17", "20:00-22:05"]
+    }
+}
+```
+
+### 2. Crear una consulta (`POST /query`)
+
+Envía la solicitud para ser procesada en segundo plano. Devuelve un `consulta_id`.
+
+**Respuesta:**
+```json
+{
+    "success": true,
+    "consulta_id": "aBcDeF12",
+    "estado": "recibido",
+    "resumen": { ... }
+}
+```
+
+### 3. Monitorear el estado (`GET /query/{consulta_id}`)
+
+Consulta el estado y progreso de una solicitud en curso.
+
+**Respuesta:**
+```json
+{
+    "consulta_id": "aBcDeF12",
+    "estado": "procesando",
+    "progreso": 45,
+    "mensaje": "Buscando y recuperando archivo 50/112",
+    ...
+}
+```
+
+### 4. Obtener resultados (`GET /query/{consulta_id}?resultados=True`)
+
+Una vez que el estado es `completado`, usa este endpoint para obtener el reporte final.
+
+**Respuesta de ejemplo:**
+```json
+{
+    "consulta_id": "aBcDeF12",
+    "estado": "completado",
+    "resultados": {
+        "fuentes": {
+            "lustre": { "archivos": [...], "total": 110 },
+            "s3": { "archivos": [...], "total": 2 }
+        },
+        "total_archivos": 112,
+        "tamaño_total_mb": 12345.67,
+        "directorio_destino": "/data/tmp/aBcDeF12",
+        "consulta_recuperacion": { ... }
+    }
+}
+```
+
+## Arquitectura
+
+*   **API (main.py)**: Construida con FastAPI, maneja las rutas, la validación inicial y delega el trabajo pesado a un procesador de fondo.
+*   **Procesador de Solicitudes (processors.py)**: Parsea y enriquece la solicitud del usuario, manejando la lógica de fechas, horarios y bandas.
+*   **Base de Datos (database.py)**: Utiliza SQLite para persistir el estado, progreso y resultados de cada consulta.
+*   **Procesador de Fondo (recover.py / s3_recover.py / background_simulator.py)**: 
+    - `recover.py`: Lógica de recuperación local (Lustre) y orquestación.
+    - `s3_recover.py`: Toda la lógica de descubrimiento y descarga desde S3, incluyendo filtrado avanzado por hora y minuto.
+    - `background_simulator.py`: Facilita el desarrollo y pruebas sin acceso a los sistemas reales.
+*   **Configuración (config.py)**: Clases que definen la lógica de validación específica para cada tipo de satélite, haciendo el sistema extensible.
+
 ## Reglas de validación de bandas
 - Nivel L1B: requiere bandas (lista o "ALL").
 - Nivel L2:
