@@ -6,6 +6,7 @@ from processors import HistoricQueryProcessor
 from schemas import HistoricQueryRequest
 from datetime import datetime
 from typing import Dict, Any
+import re
 from contextlib import asynccontextmanager
 import logging
 from pydantic import ValidationError
@@ -282,6 +283,7 @@ async def reiniciar_consulta(consulta_id: str, background_tasks: BackgroundTasks
 async def obtener_consulta(
     consulta_id: str,
     resultados: bool = False,
+    detalles: bool = False,
 ):
     """
     ✅ ENDPOINT ÚNICO PARA CONSULTAR: Estado y resultados
@@ -299,15 +301,76 @@ async def obtener_consulta(
             "resultados": consulta["resultados"]
         }
     
-    # Estado normal de la consulta
-    return {
+    # Estado normal de la consulta (omitimos 'query' si no aplica)
+    resp = {
         "consulta_id": consulta_id,
         "estado": consulta["estado"],
         "progreso": consulta["progreso"],
         "mensaje": consulta["mensaje"],
         "timestamp": consulta["timestamp_actualizacion"],
-        "query": consulta["query"] if consulta["estado"] == "recibido" else None
     }
+    if consulta["estado"] == "recibido":
+        resp["query"] = consulta["query"]
+
+    # Enriquecer con detalles de progreso solo si se solicita
+    if detalles:
+        try:
+            dest_dir = os.path.join(DOWNLOAD_PATH, consulta_id)
+            archivos = []
+            total_bytes = 0
+            if os.path.isdir(dest_dir):
+                for nombre in os.listdir(dest_dir):
+                    ruta = os.path.join(dest_dir, nombre)
+                    if os.path.isfile(ruta):
+                        archivos.append(nombre)
+                        try:
+                            total_bytes += os.path.getsize(ruta)
+                        except OSError:
+                            pass
+
+            detalles_obj: Dict[str, Any] = {
+                "archivos_en_directorio": len(archivos),
+                "tamaño_descargado_mb": round(total_bytes / (1024 * 1024), 2),
+            }
+
+            # Derivar etapa a partir del mensaje
+            msg = (consulta.get("mensaje") or "").lower()
+            if "preparando entorno" in msg:
+                etapa = "preparando"
+            elif "identificados" in msg or "procesando archivo" in msg:
+                etapa = "procesando-local"
+            elif "descargas s3 pendientes" in msg:
+                etapa = "s3-listado"
+            elif "descargando de s3" in msg or "descarga s3" in msg:
+                etapa = "s3-descargando"
+            elif "reporte final" in msg:
+                etapa = "finalizando"
+            elif consulta["estado"] == "completado":
+                etapa = "completado"
+            elif consulta["estado"] == "error":
+                etapa = "error"
+            else:
+                etapa = "desconocida"
+            detalles_obj["etapa"] = etapa
+
+            # Intentar extraer contadores de S3 del mensaje
+            m_pend = re.search(r"Descargas S3 pendientes: (\d+)", consulta.get("mensaje") or "")
+            if m_pend:
+                detalles_obj["s3_pendientes"] = int(m_pend.group(1))
+
+            m_progress = re.search(r"Descarga S3 (\d+)/(\d+)", consulta.get("mensaje") or "")
+            if m_progress:
+                detalles_obj["s3_descarga_actual"] = {
+                    "completadas": int(m_progress.group(1)),
+                    "total": int(m_progress.group(2))
+                }
+
+            if detalles_obj:
+                resp["detalles"] = detalles_obj
+        except Exception:
+            # No bloquear la respuesta si hay errores leyendo el FS
+            pass
+    return resp
 
 @app.get("/queries")
 async def listar_consultas(

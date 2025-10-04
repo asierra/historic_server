@@ -252,6 +252,13 @@ class RecoverFiles:
                     archivos_encontrados = [s3_map[k] for k in s3_map]
                     archivos_s3_filtrados += filter_files_by_time(archivos_encontrados, fecha_jjj, horarios_list)
                 objetivos_finales_s3 = list(set(archivos_s3_filtrados))
+                # Publicar un mensaje con conteo antes de iniciar descargas
+                try:
+                    total_s3 = len(objetivos_finales_s3)
+                    self.db.actualizar_estado(consulta_id, "procesando", 85, f"Descargas S3 pendientes: {total_s3}")
+                except Exception:
+                    pass
+
                 s3_recuperados, objetivos_fallidos_final = self.s3.download_files(
                     consulta_id, objetivos_finales_s3, directorio_destino, self.db
                 )

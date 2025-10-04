@@ -90,6 +90,11 @@ class S3RecoverFiles:
         s3 = s3fs.S3FileSystem(anon=True, config_kwargs={'connect_timeout': 10, 'read_timeout': 30})
         archivos_s3_recuperados = []
         objetivos_aun_fallidos = []
+        total_obj = len(set(archivos_s3)) or 1
+        completados = 0
+        update_every = 100  # Fijo: actualizar progreso cada 100 archivos
+        ok_count = 0
+        fail_count = 0
         with ThreadPool(max_workers=self.max_workers) as pool:
             future_to_s3_path = {
                 pool.schedule(self._download_single_s3_objective, args=(consulta_id, s3_path, directorio_destino, s3, db)): s3_path
@@ -101,9 +106,29 @@ class S3RecoverFiles:
                     resultado = future.result()
                     if resultado:
                         archivos_s3_recuperados.append(resultado)
+                        ok_count += 1
                 except Exception as e:
-                    self.logger.error(f"❌ Fallo final en la descarga de S3 para {s3_path}: {e}")
                     objetivos_aun_fallidos.append(Path(s3_path).name)
+                    fail_count += 1
+                finally:
+                    completados += 1
+                    if db and (completados % update_every == 0 or completados == total_obj):
+                        # Mapear progreso de 85 a 95 proporcional a descargas S3
+                        progreso = 85 + int((completados / total_obj) * 10)
+                        db.actualizar_estado(
+                            consulta_id,
+                            "procesando",
+                            progreso,
+                            f"S3 progreso: {completados}/{total_obj}"
+                        )
+                        # Log resumen cada corte
+                        self.logger.info(
+                            f"S3 progreso: {completados}/{total_obj} (ok: {ok_count}, fail: {fail_count})"
+                        )
+        # Log resumen final
+        self.logger.info(
+            f"S3 finalizado: {ok_count} ok, {fail_count} fallos de {total_obj} objetivos"
+        )
         return archivos_s3_recuperados, objetivos_aun_fallidos
 
     def _download_single_s3_objective(self, consulta_id: str, archivo_remoto_s3: str, directorio_destino: Path, s3_client: s3fs.S3FileSystem, db) -> Optional[Path]:
@@ -112,13 +137,13 @@ class S3RecoverFiles:
             try:
                 nombre_archivo_local = Path(archivo_remoto_s3).name
                 ruta_local_destino = directorio_destino / nombre_archivo_local
-                if db:
-                    db.actualizar_estado(consulta_id, "procesando", None, f"Descargando de S3 (Intento {attempt + 1}/{self.retry_attempts}): {nombre_archivo_local}")
+                # Reducir ruido: no actualizar DB por cada intento/archivo; el progreso se reporta en bloque.
                 s3_client.get(archivo_remoto_s3, str(ruta_local_destino))
                 return ruta_local_destino
             except Exception as e:
                 last_exception = e
-                self.logger.warning(f"⚠️ Falló el intento {attempt + 1}/{self.retry_attempts} para descargar {archivo_remoto_s3}: {e}")
+                # Reducir ruido: registrar intentos a nivel debug
+                self.logger.debug(f"Intento {attempt + 1}/{self.retry_attempts} falló para {archivo_remoto_s3}: {e}")
                 if attempt < self.retry_attempts - 1:
                     wait_time = self.retry_backoff * (2 ** attempt)
                     time.sleep(wait_time)
