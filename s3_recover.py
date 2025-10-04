@@ -137,6 +137,12 @@ class S3RecoverFiles:
             try:
                 nombre_archivo_local = Path(archivo_remoto_s3).name
                 ruta_local_destino = directorio_destino / nombre_archivo_local
+                # Idempotencia: si el archivo ya existe, omitir descarga
+                try:
+                    if ruta_local_destino.exists() and ruta_local_destino.stat().st_size > 0:
+                        return ruta_local_destino
+                except OSError:
+                    pass
                 # Reducir ruido: no actualizar DB por cada intento/archivo; el progreso se reporta en bloque.
                 s3_client.get(archivo_remoto_s3, str(ruta_local_destino))
                 return ruta_local_destino
