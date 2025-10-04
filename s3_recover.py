@@ -67,11 +67,9 @@ class S3RecoverFiles:
                     for s3_product_name in s3_product_names:
                         s3_path_hora = f"{s3_bucket}/{s3_product_name}/{anio}/{dia_juliano}/{hora:02d}/"
                         self.logger.info(f"[S3 DEBUG] Consultando S3: {s3_path_hora}")
-                        print(f"[S3 DEBUG] Consultando S3: {s3_path_hora}")
                         try:
                             archivos_en_hora = s3.ls(s3_path_hora)
                             self.logger.info(f"[S3 DEBUG] Archivos encontrados en {s3_path_hora}: {archivos_en_hora}")
-                            print(f"[S3 DEBUG] Archivos encontrados en {s3_path_hora}: {archivos_en_hora}")
                             archivos_nc = [f for f in archivos_en_hora if f.endswith('.nc')]
                             bandas_solicitadas = query_dict.get('bandas')
                             if bandas_solicitadas:
@@ -82,17 +80,14 @@ class S3RecoverFiles:
                                     if any(f"C{b}" in f for b in bandas_solicitadas_str)
                                 ]
                             self.logger.info(f"[S3 DEBUG] Archivos .nc filtrados por banda en {s3_path_hora}: {archivos_nc}")
-                            print(f"[S3 DEBUG] Archivos .nc filtrados por banda en {s3_path_hora}: {archivos_nc}")
 
                             # Filtra por hora:minuto usando el método de la clase
                             archivos_filtrados = self.filter_files_by_time(archivos_nc, f"{anio}{dia_juliano}", horarios_list)
                             self.logger.info(f"[S3 DEBUG] Archivos .nc filtrados por hora:minuto en {s3_path_hora}: {archivos_filtrados}")
-                            print(f"[S3 DEBUG] Archivos .nc filtrados por hora:minuto en {s3_path_hora}: {archivos_filtrados}")
 
                             objetivos_s3_a_descargar.update(archivos_filtrados)
                         except FileNotFoundError:
                             self.logger.info(f"[S3 DEBUG] Directorio S3 no encontrado: {s3_path_hora}")
-                            print(f"[S3 DEBUG] Directorio S3 no encontrado: {s3_path_hora}")
                             continue
 
         self.logger.info(f"[S3 DEBUG] Total archivos .nc a descargar: {len(objetivos_s3_a_descargar)}")
