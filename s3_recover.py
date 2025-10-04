@@ -66,32 +66,23 @@ class S3RecoverFiles:
                 for hora in range(inicio_hh, fin_hh + 1):
                     for s3_product_name in s3_product_names:
                         s3_path_hora = f"{s3_bucket}/{s3_product_name}/{anio}/{dia_juliano}/{hora:02d}/"
-                        self.logger.info(f"[S3 DEBUG] Consultando S3: {s3_path_hora}")
                         try:
                             archivos_en_hora = s3.ls(s3_path_hora)
-                            self.logger.info(f"[S3 DEBUG] Archivos encontrados en {s3_path_hora}: {archivos_en_hora}")
                             archivos_nc = [f for f in archivos_en_hora if f.endswith('.nc')]
                             bandas_solicitadas = query_dict.get('bandas')
                             if bandas_solicitadas:
-                                # Asegura que todas las bandas sean string
                                 bandas_solicitadas_str = [str(b) for b in bandas_solicitadas]
                                 archivos_nc = [
                                     f for f in archivos_nc
                                     if any(f"C{b}" in f for b in bandas_solicitadas_str)
                                 ]
-                            self.logger.info(f"[S3 DEBUG] Archivos .nc filtrados por banda en {s3_path_hora}: {archivos_nc}")
 
-                            # Filtra por hora:minuto usando el método de la clase
                             archivos_filtrados = self.filter_files_by_time(archivos_nc, f"{anio}{dia_juliano}", horarios_list)
-                            self.logger.info(f"[S3 DEBUG] Archivos .nc filtrados por hora:minuto en {s3_path_hora}: {archivos_filtrados}")
 
                             objetivos_s3_a_descargar.update(archivos_filtrados)
                         except FileNotFoundError:
-                            self.logger.info(f"[S3 DEBUG] Directorio S3 no encontrado: {s3_path_hora}")
                             continue
 
-        self.logger.info(f"[S3 DEBUG] Total archivos .nc a descargar: {len(objetivos_s3_a_descargar)}")
-        self.logger.info(f"[S3 DEBUG] Lista final de archivos .nc: {list(objetivos_s3_a_descargar)}")
         return {Path(f).name: f for f in objetivos_s3_a_descargar}
 
 
@@ -123,7 +114,6 @@ class S3RecoverFiles:
                 ruta_local_destino = directorio_destino / nombre_archivo_local
                 if db:
                     db.actualizar_estado(consulta_id, "procesando", None, f"Descargando de S3 (Intento {attempt + 1}/{self.retry_attempts}): {nombre_archivo_local}")
-                self.logger.info(f"⬇️ Descargando desde S3: {archivo_remoto_s3} -> {ruta_local_destino} (Intento {attempt + 1}/{self.retry_attempts})")
                 s3_client.get(archivo_remoto_s3, str(ruta_local_destino))
                 return ruta_local_destino
             except Exception as e:
@@ -131,7 +121,6 @@ class S3RecoverFiles:
                 self.logger.warning(f"⚠️ Falló el intento {attempt + 1}/{self.retry_attempts} para descargar {archivo_remoto_s3}: {e}")
                 if attempt < self.retry_attempts - 1:
                     wait_time = self.retry_backoff * (2 ** attempt)
-                    self.logger.info(f"   Reintentando en {wait_time} segundos...")
                     time.sleep(wait_time)
         self.logger.error(f"❌ Fallaron todos los {self.retry_attempts} intentos para descargar desde S3 el archivo {archivo_remoto_s3}.")
         if last_exception:

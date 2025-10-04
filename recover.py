@@ -110,7 +110,6 @@ class LustreRecoverFiles:
     def scan_existing_files(self, archivos_a_procesar: List[Path], destino: Path) -> List[Path]:
         if not destino.exists() or not any(destino.iterdir()):
             return archivos_a_procesar
-        self.logger.info(f"🔍 Escaneando {destino} en busca de archivos ya recuperados...")
         timestamps_existentes = set()
         for f in destino.iterdir():
             if f.is_file():
@@ -128,7 +127,6 @@ class LustreRecoverFiles:
             else:
                 archivos_pendientes.append(archivo_fuente)
         num_recuperados = len(archivos_a_procesar) - len(archivos_pendientes)
-        self.logger.info(f"📊 Escaneo completo. {num_recuperados} archivos ya recuperados, {len(archivos_pendientes)} pendientes.")
         return archivos_pendientes
 
 
@@ -167,8 +165,6 @@ class RecoverFiles:
 
     def procesar_consulta(self, consulta_id: str, query_dict: Dict):
         try:
-            self.logger.info(f" Atendiendo solicitud {consulta_id}")
-
             # 1. Preparar entorno
             directorio_destino = self.base_download_path / consulta_id
             directorio_destino.mkdir(exist_ok=True, parents=True)
@@ -177,13 +173,12 @@ class RecoverFiles:
             # 2. Descubrir y filtrar archivos locales
             archivos_a_procesar_local = self.lustre.discover_and_filter_files(query_dict)
             inaccessible_files_local = []  # Si tienes lógica para esto, agrégala aquí
-            self.logger.info(f"🔎 Se encontraron {len(archivos_a_procesar_local)} archivos potenciales en el almacenamiento local.")
 
             # 3. Escanear destino
             if archivos_a_procesar_local:
                 archivos_pendientes_local = self.lustre.scan_existing_files(archivos_a_procesar_local, directorio_destino)
                 if not archivos_pendientes_local:
-                    self.logger.info("👍 No hay archivos locales pendientes, todos los encontrados ya fueron recuperados.")
+                    pass
             else:
                 archivos_pendientes_local = []
 
@@ -271,8 +266,6 @@ class RecoverFiles:
                 consulta_id, all_files_in_destination, s3_recuperados, directorio_destino, objetivos_fallidos_final, query_dict
             )
             self.db.guardar_resultados(consulta_id, resultados_finales)
-            self.logger.info(f"✅ Procesamiento completado para {consulta_id}")
-
         except Exception as e:
             self.logger.error(f"❌ Error procesando consulta {consulta_id}: {e}")
             self.db.actualizar_estado(consulta_id, "error", 0, f"Error: {str(e)}")
@@ -466,7 +459,6 @@ def _process_safe_recover_file(archivo_fuente: Path, directorio_destino: Path, n
                                   (nivel == 'L1b' and bandas_solicitadas and not bandas_en_tgz.issubset(bandas_solicitadas))
 
             if copiar_tgz_completo:
-                logging.debug(f"📦 Copiando archivo completo (contenido mixto): {archivo_fuente.name}")
                 shutil.copy(archivo_fuente, directorio_destino)
                 archivos_recuperados.append(directorio_destino / archivo_fuente.name)
                 return archivos_recuperados
@@ -478,7 +470,6 @@ def _process_safe_recover_file(archivo_fuente: Path, directorio_destino: Path, n
                     miembros_a_extraer.append(miembro)
             
             if miembros_a_extraer:
-                logging.debug(f"🔎 Extrayendo {len(miembros_a_extraer)} archivos de {archivo_fuente.name}")
                 tar.extractall(path=directorio_destino, members=miembros_a_extraer)
                 for miembro in miembros_a_extraer:
                     archivos_recuperados.append(directorio_destino / miembro.name)
