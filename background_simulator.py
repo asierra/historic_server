@@ -67,7 +67,21 @@ class BackgroundSimulator():
                 time.sleep(duracion_segundos)
             
             resultados = self._generar_resultados_simulados(consulta_id, query_dict)
-            self.db.guardar_resultados(consulta_id, resultados)
+            # Mensaje final breve y realista, consistente con el procesador real
+            total_recuperados = resultados.get("total_archivos", 0)
+            s3_ok = resultados.get("fuentes", {}).get("s3", {}).get("total", 0)
+            lustre_ok = resultados.get("fuentes", {}).get("lustre", {}).get("total", 0)
+            # En el simulador, fallidos son los objetivos que no se recuperaron por ninguna fuente
+            objetivos_totales_estimados = lustre_ok + s3_ok + len(resultados.get("consulta_recuperacion", {}) or {})
+            # Alternativamente calcular fallidos a partir de la consulta_recuperacion si existe
+            fallidos = 0
+            if resultados.get("consulta_recuperacion"):
+                try:
+                    fallidos = sum(len(v) for v in resultados["consulta_recuperacion"].get("fechas", {}).values())
+                except Exception:
+                    fallidos = 0
+            mensaje_final = f"Recuperación: T={total_recuperados}, L={lustre_ok}, S={s3_ok}" + (f", F={fallidos}" if fallidos else "")
+            self.db.guardar_resultados(consulta_id, resultados, mensaje=mensaje_final)
             
         except Exception as e:
             logging.error(f"Error en simulación: {e}")

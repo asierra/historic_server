@@ -337,8 +337,8 @@ async def obtener_consulta(
             msg = (consulta.get("mensaje") or "").lower()
             if "preparando entorno" in msg:
                 etapa = "preparando"
-            elif "identificados" in msg or "procesando archivo" in msg:
-                etapa = "procesando-local"
+            elif "identificados" in msg or "procesando archivo" in msg or "recuperando archivo" in msg:
+                etapa = "recuperando-local"
             elif "descargas s3 pendientes" in msg:
                 etapa = "s3-listado"
             elif "descargando de s3" in msg or "descarga s3" in msg:

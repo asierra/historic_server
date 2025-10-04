@@ -140,20 +140,25 @@ class ConsultasDatabase:
             logging.error(f"Error actualizando estado: {e}")
             return False
     
-    def guardar_resultados(self, consulta_id: str, resultados: Dict):
-        """Guarda los resultados de una consulta completada"""
+    def guardar_resultados(self, consulta_id: str, resultados: Dict, mensaje: Optional[str] = None):
+        """Guarda los resultados de una consulta completada con un mensaje final opcional."""
         try:
+            mensaje_final = mensaje or 'Recuperación completada'
             with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
+                conn.execute(
+                    """
                     UPDATE consultas 
                     SET resultados = ?, estado = 'completado', progreso = 100,
-                        timestamp_actualizacion = ?, mensaje = 'Procesamiento completado'
+                        timestamp_actualizacion = ?, mensaje = ?
                     WHERE id = ?
-                """, (
-                    json.dumps(resultados),
-                    datetime.now().isoformat(),
-                    consulta_id
-                ))
+                    """,
+                    (
+                        json.dumps(resultados),
+                        datetime.now().isoformat(),
+                        mensaje_final,
+                        consulta_id,
+                    ),
+                )
                 conn.commit()
             return True
         except Exception as e:

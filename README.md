@@ -119,12 +119,32 @@ Consulta el estado y progreso de una solicitud en curso.
     "consulta_id": "aBcDeF12",
     "estado": "procesando",
     "progreso": 45,
-    "mensaje": "Buscando y recuperando archivo 50/112",
+    "mensaje": "Recuperando archivo 50/112",
     ...
 }
 ```
 
 Nota: la clave `query` solo aparece cuando el estado es `recibido`. Usa `?detalles=true` si necesitas más contexto. Para reanudar una consulta interrumpida: `POST /query/{consulta_id}/restart`.
+
+Comando útil para ver detalles en vivo (opcional):
+
+```bash
+# Reemplaza $ID por tu consulta_id
+curl -s "http://127.0.0.1:9041/query/$ID?detalles=true" | jq
+```
+
+Ejemplo de campo `detalles`:
+
+```json
+{
+    "detalles": {
+        "archivos_en_directorio": 23542,
+        "tamaño_descargado_mb": 8123.77,
+        "etapa": "recuperando-local",
+        "s3_pendientes": 229913
+    }
+}
+```
 
 ### 4. Obtener resultados (`GET /query/{consulta_id}?resultados=True`)
 
@@ -135,6 +155,7 @@ Una vez que el estado es `completado`, usa este endpoint para obtener el reporte
 {
     "consulta_id": "aBcDeF12",
     "estado": "completado",
+    "mensaje": "Recuperación: T=112, L=110, S=2",
     "resultados": {
         "fuentes": {
             "lustre": { "archivos": [...], "total": 110 },
@@ -147,6 +168,16 @@ Una vez que el estado es `completado`, usa este endpoint para obtener el reporte
     }
 }
 ```
+
+Notas de estado y progreso:
+- Etapas derivadas comunes (en `detalles` si usas `?detalles=true`):
+    - "preparando" ("preparando entorno")
+    - "recuperando-local" (mensajes como "identificados", "procesando archivo", "recuperando archivo")
+    - "s3-listado" ("descargas s3 pendientes")
+    - "s3-descargando" ("descargando de s3" / "descarga s3")
+    - "finalizando" ("reporte final")
+    - "completado", "error" o "desconocida"
+- Mensaje final conciso al completar: "Recuperación: T=NN, L=AA, S=BB[, F=FF]"
 
 ## Arquitectura
 
@@ -186,3 +217,16 @@ pytest -m "not real_io"  # sin I/O real
 - Si una consulta parece detenida tras un reinicio, puedes reencolarla:
     - `POST /query/{consulta_id}/restart`
     - El proceso retomará sin volver a descargar lo ya presente en disco.
+
+## Ajustes operativos
+
+- MAX_FILES_IN_REPORT (opcional): limita cuántos nombres de archivo se incluyen en `resultados.fuentes.*.archivos` cuando el volumen es muy grande.
+    - Predeterminado: 1000.
+    - Solo recorta las listas para hacer la respuesta y el guardado en DB más ligeros; los campos `total` siguen reportando el conteo real.
+    - Útil cuando hay cientos de miles de archivos recuperados.
+
+Ejemplo de configuración:
+
+```bash
+export MAX_FILES_IN_REPORT=800
+```

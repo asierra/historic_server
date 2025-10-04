@@ -162,6 +162,8 @@ class RecoverFiles:
         )
 
         self.s3 = S3RecoverFiles(self.logger, self.max_workers, self.S3_RETRY_ATTEMPTS, self.S3_RETRY_BACKOFF_SECONDS)
+        # Limitar tamaño de listas en el reporte final para grandes volúmenes
+        self.MAX_FILES_IN_REPORT = int(os.getenv("MAX_FILES_IN_REPORT", "1000"))
 
     def procesar_consulta(self, consulta_id: str, query_dict: Dict):
         try:
@@ -207,7 +209,7 @@ class RecoverFiles:
                 for i, future in enumerate(future_to_objetivo.keys()):
                     archivo_fuente = future_to_objetivo[future]
                     progreso = 20 + int(((i + 1) / total_pendientes) * 60)
-                    self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Procesando archivo {i+1}/{total_pendientes}")
+                    self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Recuperando archivo {i+1}/{total_pendientes}")
                     try:
                         future.result()
                     except TimeoutError:
@@ -259,9 +261,11 @@ class RecoverFiles:
                 except Exception:
                     pass
 
-                s3_recuperados, objetivos_fallidos_final = self.s3.download_files(
+                s3_recuperados, objetivos_fallidos_s3 = self.s3.download_files(
                     consulta_id, objetivos_finales_s3, directorio_destino, self.db
                 )
+                # Combinar fallos locales y de S3
+                objetivos_fallidos_final = list(objetivos_fallidos_local) + list(objetivos_fallidos_s3)
             else:
                 s3_recuperados = []
                 objetivos_fallidos_final = objetivos_fallidos_local
@@ -272,7 +276,14 @@ class RecoverFiles:
             resultados_finales = self._generar_reporte_final(
                 consulta_id, all_files_in_destination, s3_recuperados, directorio_destino, objetivos_fallidos_final, query_dict
             )
-            self.db.guardar_resultados(consulta_id, resultados_finales)
+            # Mensaje final breve y legible
+            total_recuperados = resultados_finales.get("total_archivos", 0)
+            s3_ok = resultados_finales.get("fuentes", {}).get("s3", {}).get("total", 0)
+            lustre_ok = resultados_finales.get("fuentes", {}).get("lustre", {}).get("total", 0)
+            fallidos = len(objetivos_fallidos_final) if objetivos_fallidos_final else 0
+            mensaje_final = f"Recuperación: T={total_recuperados}, L={lustre_ok}, S={s3_ok}" + (f", F={fallidos}" if fallidos else "")
+
+            self.db.guardar_resultados(consulta_id, resultados_finales, mensaje=mensaje_final)
         except Exception as e:
             self.logger.error(f"❌ Error procesando consulta {consulta_id}: {e}")
             self.db.actualizar_estado(consulta_id, "error", 0, f"Error: {str(e)}")
@@ -328,23 +339,32 @@ class RecoverFiles:
 
     def _generar_reporte_final(self, consulta_id: str, all_files_in_destination: List[Path], s3_recuperados: List[Path], directorio_destino: Path, objetivos_fallidos: List[Path], query_original: Dict) -> Dict:
         """Genera el diccionario de resultados finales."""
-        lustre_files_for_report = [f for f in all_files_in_destination if f not in s3_recuperados]
+        # Optimizar: usar comparación por nombre con set para evitar O(n^2)
+        s3_names_full = [p.name for p in s3_recuperados]
+        s3_names_set = set(s3_names_full)
+        lustre_names_full = [p.name for p in all_files_in_destination if p.name not in s3_names_set]
         todos_los_archivos = all_files_in_destination
+        # Cálculo de tamaño total (puede ser costoso con cientos de miles de archivos)
         total_bytes = sum(f.stat().st_size for f in todos_los_archivos if f.is_file())
         tamaño_mb = round(total_bytes / (1024 * 1024), 2)
 
         # Construir la consulta de recuperación usando el método refactorizado.
         consulta_recuperacion = self._build_recovery_query(consulta_id, objetivos_fallidos, query_original)
 
+        # Truncar listas si exceden el máximo configurado para mantener el JSON/DB manejable
+        max_n = self.MAX_FILES_IN_REPORT
+        s3_list = s3_names_full if len(s3_names_full) <= max_n else s3_names_full[:max_n]
+        lustre_list = lustre_names_full if len(lustre_names_full) <= max_n else lustre_names_full[:max_n]
+
         return {
             "fuentes": {
                 "lustre": {
-                    "archivos": [f.name for f in lustre_files_for_report],
-                    "total": len(lustre_files_for_report)
+                    "archivos": lustre_list,
+                    "total": len(lustre_names_full)
                 },
                 "s3": {
-                    "archivos": [f.name for f in s3_recuperados],
-                    "total": len(s3_recuperados)
+                    "archivos": s3_list,
+                    "total": len(s3_names_full)
                 }
             },
             "total_archivos": len(todos_los_archivos),
