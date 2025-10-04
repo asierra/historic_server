@@ -110,7 +110,14 @@ class S3RecoverFiles:
             except OSError:
                 pendientes.append(s3_path)
 
-        completados = len(existentes)
+        # Contabilizar archivos .nc presentes en el directorio para reflejar progreso real
+        try:
+            local_nc_count = sum(1 for p in directorio_destino.iterdir() if p.is_file() and str(p).endswith('.nc'))
+        except Exception:
+            local_nc_count = len(existentes)
+
+        # Usar el mayor entre los que coinciden con objetivos y los .nc locales, pero sin exceder total_obj
+        completados = min(max(len(existentes), local_nc_count), total_obj)
         update_every = 100  # Fijo: actualizar progreso cada 100 archivos
         ok_count = len(existentes)
         fail_count = 0
@@ -146,7 +153,7 @@ class S3RecoverFiles:
                     objetivos_aun_fallidos.append(Path(s3_path).name)
                     fail_count += 1
                 finally:
-                    completados += 1
+                    completados = min(completados + 1, total_obj)
                     if db and (completados % update_every == 0 or completados == total_obj):
                         # Mapear progreso de 85 a 95 proporcional a descargas S3
                         progreso = 85 + int((completados / total_obj) * 10)
