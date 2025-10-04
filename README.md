@@ -124,6 +124,8 @@ Consulta el estado y progreso de una solicitud en curso.
 }
 ```
 
+Nota: la clave `query` solo aparece cuando el estado es `recibido`. Usa `?detalles=true` si necesitas más contexto. Para reanudar una consulta interrumpida: `POST /query/{consulta_id}/restart`.
+
 ### 4. Obtener resultados (`GET /query/{consulta_id}?resultados=True`)
 
 Una vez que el estado es `completado`, usa este endpoint para obtener el reporte final.
