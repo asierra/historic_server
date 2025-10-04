@@ -88,24 +88,59 @@ class S3RecoverFiles:
 
     def download_files(self, consulta_id: str, archivos_s3: List[str], directorio_destino: Path, db) -> (List[Path], List[str]):
         s3 = s3fs.S3FileSystem(anon=True, config_kwargs={'connect_timeout': 10, 'read_timeout': 30})
-        archivos_s3_recuperados = []
         objetivos_aun_fallidos = []
-        total_obj = len(set(archivos_s3)) or 1
-        completados = 0
+        s3_recuperados_set = set()
+
+        # Normalizar objetivos únicos
+        objetivos_unicos = list(set(archivos_s3))
+        total_obj = len(objetivos_unicos) or 1
+
+        # Pre-contar archivos ya existentes para reflejar progreso real tras reinicio
+        existentes = []
+        pendientes = []
+        for s3_path in objetivos_unicos:
+            nombre_local = Path(s3_path).name
+            ruta_local = directorio_destino / nombre_local
+            try:
+                if ruta_local.exists() and ruta_local.stat().st_size > 0:
+                    existentes.append(s3_path)
+                    s3_recuperados_set.add(ruta_local)
+                else:
+                    pendientes.append(s3_path)
+            except OSError:
+                pendientes.append(s3_path)
+
+        completados = len(existentes)
         update_every = 100  # Fijo: actualizar progreso cada 100 archivos
-        ok_count = 0
+        ok_count = len(existentes)
         fail_count = 0
+
+        # Publicar un estado inicial con el progreso basado en archivos ya presentes
+        if db:
+            progreso_inicial = 85 + int((completados / total_obj) * 10)
+            db.actualizar_estado(
+                consulta_id,
+                "procesando",
+                progreso_inicial,
+                f"S3 progreso: {completados}/{total_obj}"
+            )
+
+        # Si no hay pendientes, retornar de inmediato
+        if not pendientes:
+            self.logger.info(f"S3: no hay descargas pendientes; {completados}/{total_obj} ya presentes")
+            return list(s3_recuperados_set), objetivos_aun_fallidos
+
         with ThreadPool(max_workers=self.max_workers) as pool:
             future_to_s3_path = {
                 pool.schedule(self._download_single_s3_objective, args=(consulta_id, s3_path, directorio_destino, s3, db)): s3_path
-                for s3_path in set(archivos_s3)
+                for s3_path in pendientes
             }
             for future in future_to_s3_path:
                 s3_path = future_to_s3_path[future]
                 try:
                     resultado = future.result()
                     if resultado:
-                        archivos_s3_recuperados.append(resultado)
+                        s3_recuperados_set.add(resultado)
                         ok_count += 1
                 except Exception as e:
                     objetivos_aun_fallidos.append(Path(s3_path).name)
@@ -129,7 +164,7 @@ class S3RecoverFiles:
         self.logger.info(
             f"S3 finalizado: {ok_count} ok, {fail_count} fallos de {total_obj} objetivos"
         )
-        return archivos_s3_recuperados, objetivos_aun_fallidos
+        return list(s3_recuperados_set), objetivos_aun_fallidos
 
     def _download_single_s3_objective(self, consulta_id: str, archivo_remoto_s3: str, directorio_destino: Path, s3_client: s3fs.S3FileSystem, db) -> Optional[Path]:
         last_exception = None

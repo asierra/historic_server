@@ -176,3 +176,11 @@ Una vez que el estado es `completado`, usa este endpoint para obtener el reporte
 pytest              # todas las pruebas
 pytest -m "not real_io"  # sin I/O real
 ```
+
+## Despliegue y reanudación segura
+
+- Las descargas desde S3 son idempotentes: si un archivo ya existe localmente, se omite. Esto permite reinicios o despliegues sin perder trabajo ya descargado.
+- El progreso durante S3 se actualiza en cortes cada 100 archivos (85%→95%). Al finalizar el reporte pasa a 100%.
+- Si una consulta parece detenida tras un reinicio, puedes reencolarla:
+    - `POST /query/{consulta_id}/restart`
+    - El proceso retomará sin volver a descargar lo ya presente en disco.

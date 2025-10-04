@@ -210,3 +210,11 @@ Exponer Gunicorn directamente a internet no es seguro ni eficiente. Nginx debe a
     sudo systemctl start nginx
     ```
     ```
+
+---
+
+## Notas operativas
+
+- Reinicios seguros: si reinicias el servicio (deploy o restart), las descargas S3 en curso se pausarán, pero al reiniciar el proceso se reanudarán. Los archivos ya presentes en disco no se vuelven a descargar.
+- Progreso en S3: el porcentaje avanza por cortes (cada 100 archivos) entre 85% y 95%; al terminar se genera el reporte final (100%).
+- Reintentos: si una consulta queda en estado inconsistente, puedes reencolarla vía `POST /query/{consulta_id}/restart`.
