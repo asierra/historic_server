@@ -225,25 +225,32 @@ class RecoverFiles:
             # 5. Recuperar desde S3 si está habilitado
             if self.s3_fallback_enabled:
                 self.db.actualizar_estado(consulta_id, "procesando", 85, "Buscando archivos adicionales en S3.")
-                # Separar productos CMI* de no-CMI para no aplicar 'bandas' a ACHA/otros
-                productos_req = (query_dict.get("productos") or [])
-                productos_upper = [str(p).strip().upper() for p in productos_req]
-                cmi_products = [p for p in productos_upper if p.startswith("CMI")]
-                other_products = [p for p in productos_upper if not p.startswith("CMI")]
-
                 s3_map = {}
-                # Consulta para CMI*: respeta 'bandas'
-                if cmi_products:
-                    q_cmi = dict(query_dict)
-                    q_cmi["productos"] = cmi_products
-                    q_cmi["bandas"] = query_dict.get("bandas") or []
-                    s3_map.update(self.s3.discover_files(q_cmi, self.GOES19_OPERATIONAL_DATE))
-                # Consulta para no-CMI: ignorar 'bandas'
-                if other_products:
-                    q_other = dict(query_dict)
-                    q_other["productos"] = other_products
-                    q_other["bandas"] = []  # explícito: no filtrar por banda
-                    s3_map.update(self.s3.discover_files(q_other, self.GOES19_OPERATIONAL_DATE))
+
+                nivel = (query_dict.get("nivel") or "").upper()
+                if nivel == "L2":
+                    # Separar productos CMI* de no-CMI para no aplicar 'bandas' a ACHA/otros
+                    productos_req = (query_dict.get("productos") or [])
+                    productos_upper = [str(p).strip().upper() for p in productos_req]
+                    cmi_products = [p for p in productos_upper if p.startswith("CMI")]
+                    other_products = [p for p in productos_upper if not p.startswith("CMI")]
+
+                    # Consulta para CMI*: respeta 'bandas'
+                    if cmi_products:
+                        q_cmi = dict(query_dict)
+                        q_cmi["productos"] = cmi_products
+                        q_cmi["bandas"] = query_dict.get("bandas") or []
+                        s3_map.update(self.s3.discover_files(q_cmi, self.GOES19_OPERATIONAL_DATE))
+                    # Consulta para no-CMI: ignorar 'bandas'
+                    if other_products:
+                        q_other = dict(query_dict)
+                        q_other["productos"] = other_products
+                        q_other["bandas"] = []  # explícito: no filtrar por banda
+                        s3_map.update(self.s3.discover_files(q_other, self.GOES19_OPERATIONAL_DATE))
+                elif nivel == "L1B":
+                    # L1b: solo una consulta, usando bandas
+                    q_l1b = dict(query_dict)
+                    s3_map.update(self.s3.discover_files(q_l1b, self.GOES19_OPERATIONAL_DATE))
 
                 archivos_s3_filtrados = []
                 for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
