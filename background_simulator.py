@@ -1,8 +1,8 @@
 import time
 import logging
 import os
-import random
 from datetime import datetime, timedelta
+import random
 from typing import Dict
 from database import ConsultasDatabase
 from collections import defaultdict
@@ -87,19 +87,6 @@ class BackgroundSimulator():
             logging.error(f"Error en simulación: {e}")
             self.db.actualizar_estado(consulta_id, "error", 0, f"Error: {str(e)}")
     
-    def obtener_estadisticas(self) -> Dict:
-        """Mismo nombre de método"""
-        consultas = self.db.listar_consultas(limite=50)
-        completadas = [c for c in consultas if c['estado'] == 'completado']
-        
-        return {
-            "tipo_procesador": self.nombre,
-            "total_consultas": len(consultas),
-            "completadas": len(completadas),
-            "en_proceso": len([c for c in consultas if c['estado'] == 'procesando']),
-            "tasa_exito": len(completadas) / max(1, len(consultas)) * 100
-        }
-    
     def _determinar_velocidad(self, query_dict: Dict, velocidad_default: str) -> str:
         """Determina la velocidad basada en la complejidad de la query"""
         total_fechas = query_dict.get('total_fechas_expandidas', 1)
@@ -130,11 +117,11 @@ class BackgroundSimulator():
         return [f"{int(b):02d}" if str(b).isdigit() else str(b) for b in bandas_solicitadas]
     
     def _generar_resultados_simulados(self, consulta_id: str, query_dict: Dict) -> Dict:
-        """Genera resultados simulados realistas, imitando la lógica de `RecoverFiles`."""
+        """Genera resultados simulados realistas, construyendo nombres de archivo dinámicamente."""
         # Extraer parámetros de la consulta
-        satelite = query_dict.get('satelite', 'GOES-16')
+        satelite = query_dict.get('satelite') or query_dict.get('sat', 'GOES-16')
         sensor = query_dict.get('sensor', 'abi')
-        nivel = query_dict.get('nivel', 'L1b')
+        nivel = query_dict.get('nivel', 'L2') # Ajustado a L2 como en los ejemplos
         dominio = query_dict.get('dominio') # Ahora es obligatorio
         bandas_solicitadas = query_dict.get('bandas') or []
         productos_solicitados = query_dict.get('productos') or []
@@ -142,21 +129,33 @@ class BackgroundSimulator():
 
         sat_code = f"G{satelite.split('-')[-1]}" if '-' in satelite else satelite
 
-        # 1. Generar todos los "objetivos" teóricos
+        # 1. Generar dinámicamente todos los "objetivos" teóricos
         objetivos = []
+        dom_code = 'F' if dominio == 'fd' else 'C'
+        
         for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
             fecha_dt = datetime.strptime(fecha_jjj, "%Y%j")
             for horario_str in horarios_list:
                 partes = horario_str.split('-')
                 inicio_str, fin_str = partes[0], partes[1] if len(partes) > 1 else partes[0]
-                inicio_dt = fecha_dt.replace(hour=int(inicio_str[:2]), minute=int(inicio_str[3:]))
-                fin_dt = fecha_dt.replace(hour=int(fin_str[:2]), minute=int(fin_str[3:]))
+                
+                inicio_dt = fecha_dt.replace(hour=int(inicio_str.split(':')[0]), minute=int(inicio_str.split(':')[1]))
+                fin_dt = fecha_dt.replace(hour=int(fin_str.split(':')[0]), minute=int(fin_str.split(':')[1]))
+
                 current_dt = inicio_dt
                 while current_dt <= fin_dt:
-                    if (dominio == 'conus' and current_dt.minute % 5 == 1) or \
-                       (dominio == 'fd' and current_dt.minute % 10 == 0):
-                        timestamp_archivo = f"s{current_dt.strftime('%Y%j%H%M')}00"
-                        nombre_tgz = f"OR_{sensor.upper()}-{nivel}-RadF-M6_{sat_code}_{timestamp_archivo}.tgz"
+                    # Aplicar la cadencia correcta para cada dominio
+                    es_tiempo_fd = (dominio == 'fd' and current_dt.minute % 10 == 0)
+                    es_tiempo_conus = (dominio == 'conus' and current_dt.minute % 5 == 1)
+
+                    if es_tiempo_fd or es_tiempo_conus:
+                        # Formato: sYYYYJJJHHMM
+                        timestamp_archivo = f"s{current_dt.strftime('%Y%j%H%M')}"
+                        if nivel == 'L1b':
+                            nombre_tgz = f"ABI-{nivel.upper()}-Rad{dom_code}-M6_{sat_code}-{timestamp_archivo}.tgz"
+                        else: # L2
+                            nombre_tgz = f"ABI-L2{dom_code}-M6_{sat_code}-{timestamp_archivo}.tgz"
+
                         fecha_ymd_str = current_dt.strftime("%Y%m%d")
                         objetivos.append({
                             "nombre_archivo": nombre_tgz,
@@ -170,17 +169,31 @@ class BackgroundSimulator():
         s3_recuperados = []
         objetivos_fallidos_final = []
 
-        for objetivo in objetivos:
-            # Simular recuperación local (80% de éxito)
-            if random.random() < self.local_success_rate:
-                lustre_recuperados.append(objetivo["nombre_archivo"])
-            else:
-                # Simular recuperación S3 (50% de éxito para los que fallaron localmente)
-                if random.random() < self.s3_success_rate:
-                    s3_recuperados.append(objetivo["nombre_archivo"])
+        # Normalizar bandas_solicitadas si es string
+        if isinstance(bandas_solicitadas, str):
+            bandas_solicitadas = [bandas_solicitadas]
+        # Caso especial: L1b y bandas=['ALL']
+        if nivel == 'L1b' and bandas_solicitadas == ['ALL']:
+            # Lustre: solo tgz
+            for objetivo in objetivos:
+                if random.random() < self.local_success_rate:
+                    lustre_recuperados.append(objetivo["nombre_archivo"])
                 else:
-                    # Fallo definitivo
-                    objetivos_fallidos_final.append(objetivo)
+                    if random.random() < self.s3_success_rate:
+                        s3_recuperados.append(objetivo["nombre_archivo"])
+                    else:
+                        objetivos_fallidos_final.append(objetivo)
+        else:
+            for objetivo in objetivos:
+                # Simular recuperación local (80% de éxito)
+                if random.random() < self.local_success_rate:
+                    lustre_recuperados.append(objetivo["nombre_archivo"])
+                else:
+                    # Simular recuperación S3 (50% de éxito para los que fallaron localmente)
+                    if random.random() < self.s3_success_rate:
+                        s3_recuperados.append(objetivo["nombre_archivo"])
+                    else:
+                        objetivos_fallidos_final.append(objetivo)
 
         # 3. Construir la consulta de recuperación
         consulta_recuperacion = None
@@ -212,10 +225,35 @@ class BackgroundSimulator():
 
         # 4. Simular la extracción de archivos si es necesario
         # (Esta lógica es simplificada, solo para el nombre del archivo)
-        copiar_tgz_completo = (nivel == 'L1b' and len(bandas_solicitadas) == 16) or \
-                              (nivel == 'L2' and not productos_solicitados)
-
-        if not copiar_tgz_completo:
+        # Lustre: si L1b y bandas=['ALL'], no expandir, solo devolver tgz
+        if nivel == 'L1b' and bandas_solicitadas == ['ALL']:
+            # Lustre ya es solo tgz; S3: expandir normalmente
+            def expandir_nombres(lista_tgz):
+                archivos_nc = []
+                dom_letter = 'C' if dominio == 'conus' else 'F'
+                for tgz_name in lista_tgz:
+                    timestamp_part = tgz_name.split('_', 4)[-1].split('.')[0]
+                    for banda in [f"{i:02d}" for i in range(1, 17)]:
+                        archivos_nc.append(
+                            f"OR_ABI-{nivel.upper()}-Rad{dom_letter}-M6C{banda}_{sat_code}_{timestamp_part}_e..._c....nc"
+                        )
+                return archivos_nc
+            s3_recuperados = expandir_nombres(s3_recuperados)
+        elif (nivel == 'L2' and productos_solicitados == ['ALL']) or (nivel == 'L2' and not productos_solicitados):
+            # L2: si productos=['ALL'] o vacío, no expandir, solo devolver tgz
+            # S3: expandir normalmente
+            def expandir_nombres(lista_tgz):
+                archivos_nc = []
+                dom_letter = 'C' if dominio == 'conus' else 'F'
+                for tgz_name in lista_tgz:
+                    timestamp_part = tgz_name.split('_', 4)[-1].split('.')[0]
+                    # Aquí podrías expandir por banda si lo necesitas
+                    archivos_nc.append(
+                        f"OR_ABI-L2{dom_letter}-M6_{sat_code}_{timestamp_part}_e..._c....nc"
+                    )
+                return archivos_nc
+            s3_recuperados = expandir_nombres(s3_recuperados)
+        else:
             # Función auxiliar para expandir nombres de .tgz a .nc
             def expandir_nombres(lista_tgz):
                 archivos_nc = []
@@ -226,14 +264,14 @@ class BackgroundSimulator():
                         for banda in bandas_solicitadas:
                             banda_str = f"{int(banda):02d}" if str(banda).isdigit() else str(banda)
                             archivos_nc.append(
-                                f"OR_{sensor.upper()}-{nivel}-Rad{dom_letter}-M6C{banda_str}_{sat_code}_{timestamp_part}_e..._c....nc"
+                                f"OR_ABI-{nivel.upper()}-Rad{dom_letter}-M6C{banda_str}_{sat_code}_{timestamp_part}_e..._c....nc"
                             )
                     elif nivel == 'L2':
-                        for producto in productos_solicitados:
+                        for producto in (p for p in productos_solicitados if p != 'ALL'):
                             prod_upper = str(producto).upper()
                             if prod_upper.startswith('CMI'):
                                 # L2 CMI: incluir banda tras M6 con patrón Cdd (ej. M6C13)
-                                product_token = f"CMIP{dom_letter}"
+                                product_token = f"{prod_upper}{dom_letter}"
                                 bands = self._resolver_bandas(nivel, prod_upper, bandas_solicitadas)
                                 for banda in bands:
                                     banda_str = f"{int(banda):02d}" if str(banda).isdigit() else str(banda)
@@ -253,6 +291,7 @@ class BackgroundSimulator():
 
         # 5. Calcular tamaño y generar el reporte final (imitando la nueva estructura)
         todos_los_archivos = lustre_recuperados + s3_recuperados
+        copiar_tgz_completo = nivel == 'L1b' and bandas_solicitadas == ['ALL']
         tamaño_por_archivo = random.uniform(100.0, 500.0) if copiar_tgz_completo else random.uniform(20.0, 150.0)
         tamaño_mb = len(todos_los_archivos) * tamaño_por_archivo
 
