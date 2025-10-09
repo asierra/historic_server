@@ -173,7 +173,18 @@ class RecoverFiles:
             self.db.actualizar_estado(consulta_id, "procesando", 10, "Preparando entorno")
 
             # 2. Descubrir y filtrar archivos locales
-            archivos_a_procesar_local = self.lustre.discover_and_filter_files(query_dict)
+            # Si productos o bandas es ['ALL'], copiar tgz completos sin expandir ni filtrar
+            productos_all = query_dict.get('productos') == ['ALL']
+            bandas_all = query_dict.get('bandas') == ['ALL']
+            if (productos_all or bandas_all) and (query_dict.get('nivel', '').upper() == 'L2'):
+                archivos_a_procesar_local = []
+                base_path = self.lustre.build_base_path(query_dict)
+                for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
+                    archivos_candidatos_dia = self.lustre.find_files_for_day(base_path, fecha_jjj)
+                    archivos_a_procesar_local.extend(archivos_candidatos_dia)
+                self.logger.info(f"Procesando tgz completos en Lustre para productos/bandas=ALL: {len(archivos_a_procesar_local)} archivos")
+            else:
+                archivos_a_procesar_local = self.lustre.discover_and_filter_files(query_dict)
             inaccessible_files_local = []  # Si tienes lógica para esto, agrégala aquí
 
             # 3. Escanear destino

@@ -19,18 +19,18 @@
       "description": "Dominio o región geográfica"
     },
     "productos": {
-      "type": "array",
       "description": "Productos derivados",
-      "items": {
-        "type": "string"
-      }
+      "oneOf": [
+        { "type": "string", "enum": ["ALL"] },
+        { "type": "array", "items": { "type": "string" } }
+      ]
     },
     "bandas": {
-      "type": "array",
       "description": "Bandas espectrales",
-      "items": {
-        "type": "string"
-      }
+      "oneOf": [
+        { "type": "string", "enum": ["ALL"] },
+        { "type": "array", "items": { "type": "string" } }
+      ]
     },
     "fechas": {
       "type": "object",
