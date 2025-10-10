@@ -123,11 +123,18 @@ class BackgroundSimulator():
         sensor = query_dict.get('sensor', 'abi')
         nivel = query_dict.get('nivel', 'L2') # Ajustado a L2 como en los ejemplos
         dominio = query_dict.get('dominio') # Ahora es obligatorio
-        bandas_solicitadas = query_dict.get('bandas') or []
+        # IMPORTANTE: Usar las bandas ORIGINALES del request antes de expandir
+        bandas_originales = query_dict.get('_original_request', {}).get('bandas') or []
+        productos_originales = query_dict.get('_original_request', {}).get('productos') or []
+        # Bandas expandidas para usar en la generación de nombres .nc
+        bandas_expandidas = query_dict.get('bandas') or []
         productos_solicitados = query_dict.get('productos') or []
         fechas_originales = query_dict.get('_original_request', {}).get('fechas', {})
 
         sat_code = f"G{satelite.split('-')[-1]}" if '-' in satelite else satelite
+        
+        # Normalizar nivel a mayúsculas para comparación
+        nivel_upper = nivel.upper() if nivel else ''
 
         # 1. Generar dinámicamente todos los "objetivos" teóricos
         objetivos = []
@@ -169,31 +176,17 @@ class BackgroundSimulator():
         s3_recuperados = []
         objetivos_fallidos_final = []
 
-        # Normalizar bandas_solicitadas si es string
-        if isinstance(bandas_solicitadas, str):
-            bandas_solicitadas = [bandas_solicitadas]
-        # Caso especial: L1b y bandas=['ALL']
-        if nivel == 'L1b' and bandas_solicitadas == ['ALL']:
-            # Lustre: solo tgz
-            for objetivo in objetivos:
-                if random.random() < self.local_success_rate:
-                    lustre_recuperados.append(objetivo["nombre_archivo"])
+        # Lógica de recuperación simplificada. La decisión de expandir se toma más adelante.
+        for objetivo in objetivos:
+            # Simular recuperación local
+            if random.random() < self.local_success_rate:
+                lustre_recuperados.append(objetivo["nombre_archivo"])
+            else:
+                # Simular recuperación S3 para los que fallaron localmente
+                if random.random() < self.s3_success_rate:
+                    s3_recuperados.append(objetivo["nombre_archivo"])
                 else:
-                    if random.random() < self.s3_success_rate:
-                        s3_recuperados.append(objetivo["nombre_archivo"])
-                    else:
-                        objetivos_fallidos_final.append(objetivo)
-        else:
-            for objetivo in objetivos:
-                # Simular recuperación local (80% de éxito)
-                if random.random() < self.local_success_rate:
-                    lustre_recuperados.append(objetivo["nombre_archivo"])
-                else:
-                    # Simular recuperación S3 (50% de éxito para los que fallaron localmente)
-                    if random.random() < self.s3_success_rate:
-                        s3_recuperados.append(objetivo["nombre_archivo"])
-                    else:
-                        objetivos_fallidos_final.append(objetivo)
+                    objetivos_fallidos_final.append(objetivo)
 
         # 3. Construir la consulta de recuperación
         consulta_recuperacion = None
@@ -225,73 +218,78 @@ class BackgroundSimulator():
 
         # 4. Simular la extracción de archivos si es necesario
         # (Esta lógica es simplificada, solo para el nombre del archivo)
-        # Lustre: si L1b y bandas=['ALL'], no expandir, solo devolver tgz
-        if nivel == 'L1b' and bandas_solicitadas == ['ALL']:
-            # Lustre ya es solo tgz; S3: expandir normalmente
-            def expandir_nombres(lista_tgz):
-                archivos_nc = []
-                dom_letter = 'C' if dominio == 'conus' else 'F'
-                for tgz_name in lista_tgz:
-                    timestamp_part = tgz_name.split('_', 4)[-1].split('.')[0]
-                    for banda in [f"{i:02d}" for i in range(1, 17)]:
-                        archivos_nc.append(
-                            f"OR_ABI-{nivel.upper()}-Rad{dom_letter}-M6C{banda}_{sat_code}_{timestamp_part}_e..._c....nc"
-                        )
-                return archivos_nc
-            s3_recuperados = expandir_nombres(s3_recuperados)
-        elif (nivel == 'L2' and productos_solicitados == ['ALL']) or (nivel == 'L2' and not productos_solicitados):
-            # L2: si productos=['ALL'] o vacío, no expandir, solo devolver tgz
-            # S3: expandir normalmente
-            def expandir_nombres(lista_tgz):
-                archivos_nc = []
-                dom_letter = 'C' if dominio == 'conus' else 'F'
-                for tgz_name in lista_tgz:
-                    timestamp_part = tgz_name.split('_', 4)[-1].split('.')[0]
-                    # Aquí podrías expandir por banda si lo necesitas
-                    archivos_nc.append(
-                        f"OR_ABI-L2{dom_letter}-M6_{sat_code}_{timestamp_part}_e..._c....nc"
-                    )
-                return archivos_nc
-            s3_recuperados = expandir_nombres(s3_recuperados)
+        # Determinar si se debe devolver el .tgz o expandir a .nc
+        # IMPORTANTE: Usar las bandas ORIGINALES para determinar si se debe copiar el .tgz completo
+        
+        # Normalizar bandas_originales y productos_originales para manejar tanto strings como listas
+        if isinstance(bandas_originales, str):
+            bandas_originales = [bandas_originales]
+        if isinstance(productos_originales, str):
+            productos_originales = [productos_originales]
+        
+        tiene_all_bandas = 'ALL' in [str(b).upper() for b in (bandas_originales or [])]
+        tiene_all_productos = 'ALL' in [str(p).upper() for p in (productos_originales or [])]
+        
+        copiar_tgz_completo = (
+            (nivel_upper == 'L1B' and tiene_all_bandas) or
+            (nivel_upper == 'L2' and tiene_all_bandas and tiene_all_productos)
+        )
+        
+        logging.info(f"Simulador - Consulta {consulta_id}: nivel={nivel_upper}, bandas_originales={bandas_originales}, productos_originales={productos_originales}")
+        logging.info(f"Simulador - copiar_tgz_completo={copiar_tgz_completo}, tiene_all_bandas={tiene_all_bandas}, tiene_all_productos={tiene_all_productos}")
+
+        if copiar_tgz_completo:
+            # Para Lustre, los nombres ya son .tgz. Para S3, también simulamos que se recupera el .tgz.
+            # No se hace ninguna expansión. Las listas 'lustre_recuperados' y 's3_recuperados'
+            # ya contienen los nombres de los .tgz, así que no hacemos nada.
+            logging.info(f"Simulador - Devolviendo archivos .tgz sin expandir para consulta {consulta_id}")
+            pass
         else:
-            # Función auxiliar para expandir nombres de .tgz a .nc
-            def expandir_nombres(lista_tgz):
+            logging.info(f"Simulador - Expandiendo archivos .tgz a .nc para consulta {consulta_id}")
+           # Función auxiliar para expandir nombres de .tgz a .nc
+            def expandir_nombres(lista_tgz: list):
                 archivos_nc = []
                 dom_letter = 'C' if dominio == 'conus' else 'F'
                 for tgz_name in lista_tgz:
                     timestamp_part = tgz_name.split('_', 4)[-1].split('.')[0]
-                    if nivel == 'L1b':
-                        for banda in bandas_solicitadas:
+                    if nivel_upper == 'L1B':
+                        # Extraer solo las bandas expandidas (no incluye 'ALL')
+                        for banda in bandas_expandidas:
                             banda_str = f"{int(banda):02d}" if str(banda).isdigit() else str(banda)
                             archivos_nc.append(
                                 f"OR_ABI-{nivel.upper()}-Rad{dom_letter}-M6C{banda_str}_{sat_code}_{timestamp_part}_e..._c....nc"
                             )
-                    elif nivel == 'L2':
-                        for producto in (p for p in productos_solicitados if p != 'ALL'):
+                    elif nivel_upper == 'L2':
+                        # Usar las bandas expandidas para CMI
+                        bandas_para_cmi = bandas_expandidas
+                        
+                        # Simular algunos productos si es ALL
+                        productos_a_procesar = productos_solicitados if not tiene_all_productos else ['CMI', 'ACHA']
+
+                        for producto in (p for p in productos_a_procesar if p != 'ALL'):
                             prod_upper = str(producto).upper()
                             if prod_upper.startswith('CMI'):
-                                # L2 CMI: incluir banda tras M6 con patrón Cdd (ej. M6C13)
                                 product_token = f"{prod_upper}{dom_letter}"
-                                bands = self._resolver_bandas(nivel, prod_upper, bandas_solicitadas)
-                                for banda in bands:
+                                for banda in bandas_para_cmi:
                                     banda_str = f"{int(banda):02d}" if str(banda).isdigit() else str(banda)
                                     archivos_nc.append(
                                         f"CG_{sensor.upper()}-L2-{product_token}-M6C{banda_str}_{sat_code}_{timestamp_part}_e..._c....nc"
                                     )
                             else:
-                                # L2 no CMI: sin banda específica
+                                # L2 no CMI: se extrae el producto sin importar las bandas
                                 product_token = f"{prod_upper}{dom_letter}"
                                 archivos_nc.append(
                                     f"OR_{sensor.upper()}-L2-{product_token}-M6_{sat_code}_{timestamp_part}_e..._c....nc"
                                 )
                 return archivos_nc
+
             # Aplicar la expansión a ambas listas
             lustre_recuperados = expandir_nombres(lustre_recuperados)
             s3_recuperados = expandir_nombres(s3_recuperados)
 
         # 5. Calcular tamaño y generar el reporte final (imitando la nueva estructura)
         todos_los_archivos = lustre_recuperados + s3_recuperados
-        copiar_tgz_completo = nivel == 'L1b' and bandas_solicitadas == ['ALL']
+        # El tamaño depende del tipo de archivo (.tgz es más grande que .nc individual)
         tamaño_por_archivo = random.uniform(100.0, 500.0) if copiar_tgz_completo else random.uniform(20.0, 150.0)
         tamaño_mb = len(todos_los_archivos) * tamaño_por_archivo
 

@@ -172,19 +172,10 @@ class RecoverFiles:
             directorio_destino.mkdir(exist_ok=True, parents=True)
             self.db.actualizar_estado(consulta_id, "procesando", 10, "Preparando entorno")
 
-            # 2. Descubrir y filtrar archivos locales
-            # Si productos o bandas es ['ALL'], copiar tgz completos sin expandir ni filtrar
-            productos_all = query_dict.get('productos') == ['ALL']
-            bandas_all = query_dict.get('bandas') == ['ALL']
-            if (productos_all or bandas_all) and (query_dict.get('nivel', '').upper() == 'L2'):
-                archivos_a_procesar_local = []
-                base_path = self.lustre.build_base_path(query_dict)
-                for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
-                    archivos_candidatos_dia = self.lustre.find_files_for_day(base_path, fecha_jjj)
-                    archivos_a_procesar_local.extend(archivos_candidatos_dia)
-                self.logger.info(f"Procesando tgz completos en Lustre para productos/bandas=ALL: {len(archivos_a_procesar_local)} archivos")
-            else:
-                archivos_a_procesar_local = self.lustre.discover_and_filter_files(query_dict)
+            # 2. Descubrir y filtrar archivos locales.
+            # Se elimina la lógica especial para 'ALL' en esta etapa.
+            # La decisión de copiar el tgz completo o extraer se toma por archivo en _process_safe_recover_file.
+            archivos_a_procesar_local = self.lustre.discover_and_filter_files(query_dict)
             inaccessible_files_local = []  # Si tienes lógica para esto, agrégala aquí
 
             # 3. Escanear destino
@@ -470,42 +461,55 @@ def _process_safe_recover_file(archivo_fuente: Path, directorio_destino: Path, n
     """
     archivos_recuperados = []
     
+    # Normalizar entradas para facilitar las comprobaciones
+    productos_solicitados = set(p.upper() for p in (productos_solicitados_list or []))
+    bandas_solicitadas = set(bandas_solicitadas_list or [])
+    nivel_upper = (nivel or "").upper()
+
+    # --- Lógica de decisión: Copiar .tgz completo vs. Extracción selectiva ---
+    # Basado en las reglas definidas:
+    # 1. L1b y bandas="ALL" -> Copiar .tgz completo.
+    # 2. L2, bandas="ALL" y productos="ALL" -> Copiar .tgz completo.
+    # 3. En todos los demás casos, se debe extraer selectivamente.
+    
+    copiar_tgz_completo = (
+        (nivel_upper == 'L1B' and 'ALL' in bandas_solicitadas) or
+        (nivel_upper == 'L2' and 'ALL' in bandas_solicitadas and 'ALL' in productos_solicitados)
+    )
+
+    if copiar_tgz_completo:
+        shutil.copy(archivo_fuente, directorio_destino)
+        archivos_recuperados.append(directorio_destino / archivo_fuente.name)
+        return archivos_recuperados
+
+    # --- Lógica de extracción selectiva ---
     try:
         with tarfile.open(archivo_fuente, "r:gz") as tar:
-            productos_en_tgz = set()
-            bandas_en_tgz = set()
             miembros_del_tar = tar.getmembers()
-
-            for miembro in miembros_del_tar:
-                if miembro.isfile():
-                    if "-L2-" in miembro.name:
-                        try: productos_en_tgz.add(miembro.name.split('-L2-')[1].split('F-')[0])
-                        except IndexError: pass
-                    if "C" in miembro.name and "_" in miembro.name:
-                        try:
-                            banda = miembro.name.split('C', 1)[1].split('_', 1)[0]
-                            if banda.isdigit():
-                                bandas_en_tgz.add(banda)
-                        except IndexError: pass
-
-            productos_solicitados = set(productos_solicitados_list or [])
-            bandas_solicitadas = set(bandas_solicitadas_list or [])
-
-            copiar_tgz_completo = (nivel == 'L2' and not productos_solicitados) or \
-                                  (nivel == 'L1b' and not bandas_solicitadas) or \
-                                  (nivel == 'L2' and productos_solicitados and not productos_en_tgz.issubset(productos_solicitados)) or \
-                                  (nivel == 'L1b' and bandas_solicitadas and not bandas_en_tgz.issubset(bandas_solicitadas))
-
-            if copiar_tgz_completo:
-                shutil.copy(archivo_fuente, directorio_destino)
-                archivos_recuperados.append(directorio_destino / archivo_fuente.name)
-                return archivos_recuperados
-
             miembros_a_extraer = []
+
+            # Determinar qué bandas usar para productos CMI
+            # Si se pidió 'ALL', se usan todas (1-16). Si no, se usan las especificadas.
+            bandas_para_cmi = {f"{i:02d}" for i in range(1, 17)} if 'ALL' in bandas_solicitadas else bandas_solicitadas
+
+            # Iterar sobre cada archivo dentro del .tgz
             for miembro in miembros_del_tar:
-                if any(f"-L2-{p}" in miembro.name for p in productos_solicitados) or \
-                   any(f"C{b}_" in miembro.name for b in bandas_solicitadas):
+                if not miembro.isfile():
+                    continue
+
+                # Lógica para L1b: extraer si la banda está en la lista solicitada
+                if nivel_upper == 'L1B' and any(f"C{b}_" in miembro.name for b in bandas_solicitadas):
                     miembros_a_extraer.append(miembro)
+                    continue
+
+                # Lógica para L2: más compleja
+                if nivel_upper == 'L2':
+                    # Extraer si el producto está en la lista (o si se pidió 'ALL' productos)
+                    if 'ALL' in productos_solicitados or any(f"-L2-{p.upper()}" in miembro.name for p in productos_solicitados):
+                        # Si es un producto CMI, verificar también la banda
+                        if 'CMI' in miembro.name and not any(f"C{b}_" in miembro.name for b in bandas_para_cmi):
+                            continue  # Es CMI pero no de la banda correcta, saltar
+                        miembros_a_extraer.append(miembro)
             
             if miembros_a_extraer:
                 tar.extractall(path=directorio_destino, members=miembros_a_extraer)

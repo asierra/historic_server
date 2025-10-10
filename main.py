@@ -157,12 +157,16 @@ def _validate_and_prepare_request(request_data: Dict[str, Any]) -> (Dict[str, An
     nivel_upper = (data['nivel'] or '').upper()
     productos_upper = [str(p).strip().upper() for p in (request.productos or [])]
     is_cmi_product = any(p.startswith('CMI') for p in productos_upper)  # acepta CMIP, CMIPC, CMI, etc.
-    requiere_bandas = (nivel_upper == 'L1B') or (nivel_upper == 'L2' and is_cmi_product)
+    tiene_all_productos = 'ALL' in productos_upper
+    
+    # L1b siempre requiere bandas
+    # L2 requiere bandas si: tiene productos CMI, O tiene productos='ALL'
+    requiere_bandas = (nivel_upper == 'L1B') or (nivel_upper == 'L2' and (is_cmi_product or tiene_all_productos))
 
     if requiere_bandas:
         data['bandas'] = request.bandas or config.DEFAULT_BANDAS
     else:
-        # L2 sin productos CMI: no exigir bandas
+        # L2 sin productos CMI ni ALL: no exigir bandas
         data['bandas'] = []
 
     if not config.is_valid_satellite(data['sat']):

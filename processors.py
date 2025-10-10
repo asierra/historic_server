@@ -70,6 +70,9 @@ class HistoricQuery:
     productos: Optional[List[str]] = None
     bandas: Optional[List[str]] = None
     creado_por: Optional[str] = None
+    # Campos para guardar valores originales antes de expansión
+    bandas_originales: Optional[List[str]] = None
+    productos_originales: Optional[List[str]] = None
     total_horas: float = field(init=False)
     total_fechas: int = field(init=False)
     
@@ -110,7 +113,9 @@ class HistoricQuery:
             'total_fechas_expandidas': len(fechas_dict), # Asegurarse de que este campo esté presente
             '_original_request': {
                 'sat': self.satelite, 'sensor': self.sensor, 'nivel': self.nivel,
-                'dominio': self.dominio, 'productos': self.productos, 'bandas': self.bandas,
+                'dominio': self.dominio, 
+                'productos': self.productos_originales if self.productos_originales else self.productos, 
+                'bandas': self.bandas_originales if self.bandas_originales else self.bandas,
                 'creado_por': self.creado_por, 'fechas': original_request_fechas
             }
         }
@@ -153,6 +158,10 @@ class HistoricQueryProcessor:
                 raise ValueError(f"Formato de fecha inválido: '{fecha_str}'. Se esperaba 'YYYYMMDD' o 'YYYYMMDD-YYYYMMDD'.")
         
         # Los datos ya vienen validados y con valores por defecto.
+        # Guardar valores originales antes de expandir
+        bandas_originales = request_data['bandas']
+        productos_originales = request_data.get('productos')
+        
         # La única tarea específica de la configuración aquí es expandir las bandas.
         bandas_expandidas = config.expand_bandas(request_data['bandas'])
         
@@ -163,6 +172,8 @@ class HistoricQueryProcessor:
             dominio=request_data.get('dominio'),
             productos=request_data.get('productos'),
             bandas=bandas_expandidas,
+            bandas_originales=bandas_originales,
+            productos_originales=productos_originales,
             fechas=fechas,
             creado_por=request_data.get('creado_por')
         )
