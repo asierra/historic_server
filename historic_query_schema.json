@@ -7,8 +7,7 @@
   "properties": {
     "sat": {
       "type": "string",
-      "enum": ["GOES-East", "GOES-West", "GOES-16", "GOES-18", "GOES-19"],
-      "default": "GOES-East"
+      "description": "Nombre del satélite (ej. GOES-16, GOES-18)"
     },
     "nivel": {
       "type": "string",
