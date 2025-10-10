@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests (unit + simulator behavior)
+        env:
+          PROCESSOR_MODE: simulador
+        run: |
+          pytest -q test_simulator_sources_behavior.py test_api.py
+
+      - name: Run recover behavior tests (no real IO)
+        run: |
+          pytest -q test_recover_behavior.py
