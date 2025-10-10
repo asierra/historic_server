@@ -238,60 +238,61 @@ class BackgroundSimulator():
         logging.info(f"Simulador - Consulta {consulta_id}: nivel={nivel_upper}, bandas_originales={bandas_originales}, productos_originales={productos_originales}")
         logging.info(f"Simulador - copiar_tgz_completo={copiar_tgz_completo}, tiene_all_bandas={tiene_all_bandas}, tiene_all_productos={tiene_all_productos}")
 
+        # Función auxiliar para expandir nombres de .tgz a .nc (reutilizable en ambas ramas)
+        def expandir_nombres(lista_tgz: list):
+            archivos_nc = []
+            dom_letter = 'C' if dominio == 'conus' else 'F'
+            for tgz_name in lista_tgz:
+                timestamp_part = tgz_name.split('_', 4)[-1].split('.')[0]
+                if nivel_upper == 'L1B':
+                    # Extraer solo las bandas expandidas (no incluye 'ALL')
+                    for banda in bandas_expandidas:
+                        banda_str = f"{int(banda):02d}" if str(banda).isdigit() else str(banda)
+                        archivos_nc.append(
+                            f"OR_ABI-{nivel.upper()}-Rad{dom_letter}-M6C{banda_str}_{sat_code}_{timestamp_part}_e..._c....nc"
+                        )
+                elif nivel_upper == 'L2':
+                    # Usar las bandas expandidas para CMI
+                    bandas_para_cmi = bandas_expandidas
+                    
+                    # Simular algunos productos si es ALL
+                    productos_a_procesar = productos_solicitados if not tiene_all_productos else ['CMI', 'ACHA']
+
+                    for producto in (p for p in productos_a_procesar if p != 'ALL'):
+                        prod_upper = str(producto).upper()
+                        if prod_upper.startswith('CMI'):
+                            product_token = f"{prod_upper}{dom_letter}"
+                            for banda in bandas_para_cmi:
+                                banda_str = f"{int(banda):02d}" if str(banda).isdigit() else str(banda)
+                                archivos_nc.append(
+                                    f"CG_{sensor.upper()}-L2-{product_token}-M6C{banda_str}_{sat_code}_{timestamp_part}_e..._c....nc"
+                                )
+                        else:
+                            # L2 no CMI: se extrae el producto sin importar las bandas
+                            product_token = f"{prod_upper}{dom_letter}"
+                            archivos_nc.append(
+                                f"OR_{sensor.upper()}-L2-{product_token}-M6_{sat_code}_{timestamp_part}_e..._c....nc"
+                            )
+            return archivos_nc
+
         if copiar_tgz_completo:
-            # Para Lustre, los nombres ya son .tgz. Para S3, también simulamos que se recupera el .tgz.
-            # No se hace ninguna expansión. Las listas 'lustre_recuperados' y 's3_recuperados'
-            # ya contienen los nombres de los .tgz, así que no hacemos nada.
-            logging.info(f"Simulador - Devolviendo archivos .tgz sin expandir para consulta {consulta_id}")
-            pass
+            # Lustre conserva tgz; S3 siempre se expande a .nc
+            logging.info(f"Simulador - Lustre: .tgz sin expandir; S3: expandiendo a .nc (consulta {consulta_id})")
+            s3_recuperados = expandir_nombres(s3_recuperados)
         else:
             logging.info(f"Simulador - Expandiendo archivos .tgz a .nc para consulta {consulta_id}")
-           # Función auxiliar para expandir nombres de .tgz a .nc
-            def expandir_nombres(lista_tgz: list):
-                archivos_nc = []
-                dom_letter = 'C' if dominio == 'conus' else 'F'
-                for tgz_name in lista_tgz:
-                    timestamp_part = tgz_name.split('_', 4)[-1].split('.')[0]
-                    if nivel_upper == 'L1B':
-                        # Extraer solo las bandas expandidas (no incluye 'ALL')
-                        for banda in bandas_expandidas:
-                            banda_str = f"{int(banda):02d}" if str(banda).isdigit() else str(banda)
-                            archivos_nc.append(
-                                f"OR_ABI-{nivel.upper()}-Rad{dom_letter}-M6C{banda_str}_{sat_code}_{timestamp_part}_e..._c....nc"
-                            )
-                    elif nivel_upper == 'L2':
-                        # Usar las bandas expandidas para CMI
-                        bandas_para_cmi = bandas_expandidas
-                        
-                        # Simular algunos productos si es ALL
-                        productos_a_procesar = productos_solicitados if not tiene_all_productos else ['CMI', 'ACHA']
-
-                        for producto in (p for p in productos_a_procesar if p != 'ALL'):
-                            prod_upper = str(producto).upper()
-                            if prod_upper.startswith('CMI'):
-                                product_token = f"{prod_upper}{dom_letter}"
-                                for banda in bandas_para_cmi:
-                                    banda_str = f"{int(banda):02d}" if str(banda).isdigit() else str(banda)
-                                    archivos_nc.append(
-                                        f"CG_{sensor.upper()}-L2-{product_token}-M6C{banda_str}_{sat_code}_{timestamp_part}_e..._c....nc"
-                                    )
-                            else:
-                                # L2 no CMI: se extrae el producto sin importar las bandas
-                                product_token = f"{prod_upper}{dom_letter}"
-                                archivos_nc.append(
-                                    f"OR_{sensor.upper()}-L2-{product_token}-M6_{sat_code}_{timestamp_part}_e..._c....nc"
-                                )
-                return archivos_nc
-
             # Aplicar la expansión a ambas listas
             lustre_recuperados = expandir_nombres(lustre_recuperados)
             s3_recuperados = expandir_nombres(s3_recuperados)
 
         # 5. Calcular tamaño y generar el reporte final (imitando la nueva estructura)
         todos_los_archivos = lustre_recuperados + s3_recuperados
-        # El tamaño depende del tipo de archivo (.tgz es más grande que .nc individual)
-        tamaño_por_archivo = random.uniform(100.0, 500.0) if copiar_tgz_completo else random.uniform(20.0, 150.0)
-        tamaño_mb = len(todos_los_archivos) * tamaño_por_archivo
+        # Asignar tamaño diferente según extensión (.tgz más grande que .nc)
+        size_tgz = random.uniform(100.0, 500.0)
+        size_nc = random.uniform(20.0, 150.0)
+        tamaño_mb = 0.0
+        for f in todos_los_archivos:
+            tamaño_mb += size_tgz if str(f).endswith('.tgz') else size_nc
 
         return {
             "fuentes": {
