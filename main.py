@@ -108,7 +108,7 @@ async def health_check_detailed():
     db_status = "ok"
     storage_status = "ok"
     overall_status = "ok"
-    
+
     # 1. Verificar la conexión a la base de datos
     try:
         db.listar_consultas(limite=1) # Intenta una operación simple
@@ -121,9 +121,24 @@ async def health_check_detailed():
         storage_status = f"error: La ruta de origen '{SOURCE_DATA_PATH}' no existe o no es accesible."
         overall_status = "error"
 
+    # 3. Reportar estado de Lustre y S3
+    lustre_status = getattr(recover, "lustre_enabled", None)
+    s3_status = getattr(recover, "s3_fallback_enabled", None)
+    if lustre_status is None:
+        lustre_status = False
+    if s3_status is None:
+        s3_status = False
+
     status_code = 200 if overall_status == "ok" else 503 # Service Unavailable
-    
-    return {"status": overall_status, "database": db_status, "storage": storage_status}
+
+    return {
+        "status": overall_status,
+        "database": db_status,
+        "storage": storage_status,
+        "lustre_enabled": lustre_status,
+        "s3_enabled": s3_status,
+        "timestamp": datetime.now().isoformat()
+    }
 
 
 def _validate_and_prepare_request(request_data: Dict[str, Any]) -> (Dict[str, Any], Any):

@@ -148,7 +148,7 @@ class RecoverFiles:
             disable_lustre_env = os.getenv("DISABLE_LUSTRE", "").lower()
             self.lustre_enabled = os.getenv("LUSTRE_ENABLED", "1") not in ("0", "false", "False") and disable_lustre_env not in ("1", "true")
 
-        self.FILE_PROCESSING_TIMEOUT_SECONDS = int(os.getenv("FILE_PROCESSING_TIMEOUT_SECONDS", "120"))
+        self.FILE_PROCESSING_TIMEOUT_SECONDS = int(os.getenv("FILE_PROCESSING_TIMEOUT_SECONDS", "10"))
         self.S3_RETRY_ATTEMPTS = 3
         self.S3_RETRY_BACKOFF_SECONDS = 2
         self.GOES19_OPERATIONAL_DATE = datetime(2025, 4, 1, tzinfo=timezone.utc)
@@ -158,7 +158,7 @@ class RecoverFiles:
         self.max_workers = (
             max_workers
             or getattr(executor, "max_workers", None)
-            or int(os.getenv("HISTORIC_MAX_WORKERS", "4"))
+            or int(os.getenv("HISTORIC_MAX_WORKERS", "16"))
         )
 
         self.s3 = S3RecoverFiles(self.logger, self.max_workers, self.S3_RETRY_ATTEMPTS, self.S3_RETRY_BACKOFF_SECONDS)
