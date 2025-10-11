@@ -40,7 +40,7 @@ class SatelliteConfigGOES(SatelliteConfigBase):
         return [
             "ADP", "AOD", "ACM", "CMIP", "CODD", "CODN", "CPSD", "CPSN",
             "ACHA", "ACTP", "CTP", "ACHT", "Rainfall", "SST", "TPW", 
-            "DMW", "DMWV", "LST", "AVIATION_FOG"
+            "DMW", "DMWV", "LST", "AVIATION_FOG", "VAA"
         ]
 
     @property

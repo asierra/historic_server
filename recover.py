@@ -193,6 +193,10 @@ class RecoverFiles:
             objetivos_fallidos_local.extend(inaccessible_files_local)
 
             # 4. Procesar archivos pendientes en paralelo
+            # Extraer bandas y productos originales del request para lógica tgz
+            original_req = query_dict.get('_original_request', {})
+            bandas_original = original_req.get('bandas', query_dict.get('bandas'))
+            productos_original = original_req.get('productos', query_dict.get('productos'))
             if archivos_pendientes_local:
                 future_to_objetivo = {
                     self.executor.schedule(
@@ -201,8 +205,8 @@ class RecoverFiles:
                             archivo_a_procesar, 
                             directorio_destino, 
                             query_dict.get('nivel'), 
-                            query_dict.get('productos'), 
-                            query_dict.get('bandas')
+                            productos_original, 
+                            bandas_original
                         ), 
                         timeout=self.FILE_PROCESSING_TIMEOUT_SECONDS
                     ): archivo_a_procesar
@@ -210,16 +214,19 @@ class RecoverFiles:
                 }
                 for i, future in enumerate(future_to_objetivo.keys()):
                     archivo_fuente = future_to_objetivo[future]
-                    progreso = 20 + int(((i + 1) / total_pendientes) * 60)
-                    self.db.actualizar_estado(consulta_id, "procesando", progreso, f"Recuperando archivo {i+1}/{total_pendientes}")
                     try:
                         future.result()
+                        mensaje = f"Recuperado archivo {i+1}/{total_pendientes} ({archivo_fuente.name})"
                     except TimeoutError:
-                        self.logger.error(f"❌ Procesamiento del archivo {archivo_fuente.name} excedió el tiempo límite de {self.FILE_PROCESSING_TIMEOUT_SECONDS}s y fue terminado.")
+                        self.logger.error(f"❌ Timeout en archivo {archivo_fuente.name}")
                         objetivos_fallidos_local.append(archivo_fuente)
+                        mensaje = f"Fallo por timeout {i+1}/{total_pendientes} ({archivo_fuente.name})"
                     except Exception as e:
                         self.logger.error(f"❌ Error procesando el archivo {archivo_fuente.name}: {e}")
                         objetivos_fallidos_local.append(archivo_fuente)
+                        mensaje = f"Fallo {i+1}/{total_pendientes} ({archivo_fuente.name})"
+                    progreso = 20 + int(((i + 1) / total_pendientes) * 60)
+                    self.db.actualizar_estado(consulta_id, "procesando", progreso, mensaje)
 
             # 5. Recuperar desde S3 si está habilitado
             if self.s3_fallback_enabled:
@@ -400,16 +407,24 @@ class RecoverFiles:
         bandas = bandas or []
 
         for prod in productos_upper:
-            if prod.startswith("CMI"):
+            # Mapeo especial para S3
+            if prod in ("CODD", "CODN", "COD"):
+                prod_s3 = "COD"
+            elif prod in ("CPSD", "CPSN", "CPS"):
+                prod_s3 = "CPS"
+            elif prod in ("VAAF", "VAA"):
+                prod_s3 = "VAA"
+            else:
+                prod_s3 = prod
+
+            if prod_s3.startswith("CMI"):
                 # Si no se enviaron bandas, usa ALL (16) o deja que aguas abajo expanda.
                 iter_bandas = bandas or [f"{i:02d}" for i in range(1, 17)]
                 for b in iter_bandas:
                     b2 = f"{int(b):02d}" if str(b).isdigit() else str(b)
-                    # Ejemplo: CG_ABI-L2-CMIPC-M6C13_G16_sYYYYJJJHHMMSS_eYYYYJJJHHMMSS_c*.nc
-                    yield f"CG_ABI-L2-{prod}{dom_letter}-M6C{b2}_{sat_code}_s{ts_inicio}_e{ts_fin}_c*.nc"
+                    yield f"CG_ABI-L2-{prod_s3}{dom_letter}-M6C{b2}_{sat_code}_s{ts_inicio}_e{ts_fin}_c*.nc"
             else:
-                # Ejemplo: CG_ABI-L2-ACHAC-M6_G16_sYYYYJJJHHMMSS_eYYYYJJJHHMMSS_c*.nc
-                yield f"CG_ABI-L2-{prod}{dom_letter}-M6_{sat_code}_s{ts_inicio}_e{ts_fin}_c*.nc"
+                yield f"CG_ABI-L2-{prod_s3}{dom_letter}-M6_{sat_code}_s{ts_inicio}_e{ts_fin}_c*.nc"
 
     # En donde actualmente construyes los patrones para buscar en Lustre/S3,
     # reemplaza el bloque que usa 'bandas' para todos los productos por algo como:
@@ -462,19 +477,19 @@ def _process_safe_recover_file(archivo_fuente: Path, directorio_destino: Path, n
     archivos_recuperados = []
     
     # Normalizar entradas para facilitar las comprobaciones
+    # Normalizar para aceptar string o lista
+    if isinstance(productos_solicitados_list, str):
+        productos_solicitados_list = [productos_solicitados_list]
+    if isinstance(bandas_solicitadas_list, str):
+        bandas_solicitadas_list = [bandas_solicitadas_list]
     productos_solicitados = set(p.upper() for p in (productos_solicitados_list or []))
     bandas_solicitadas = set(bandas_solicitadas_list or [])
     nivel_upper = (nivel or "").upper()
 
     # --- Lógica de decisión: Copiar .tgz completo vs. Extracción selectiva ---
-    # Basado en las reglas definidas:
-    # 1. L1b y bandas="ALL" -> Copiar .tgz completo.
-    # 2. L2, bandas="ALL" y productos="ALL" -> Copiar .tgz completo.
-    # 3. En todos los demás casos, se debe extraer selectivamente.
-    
     copiar_tgz_completo = (
-        (nivel_upper == 'L1B' and 'ALL' in bandas_solicitadas) or
-        (nivel_upper == 'L2' and 'ALL' in bandas_solicitadas and 'ALL' in productos_solicitados)
+        (nivel_upper == 'L1B' and ('ALL' in bandas_solicitadas or bandas_solicitadas_list == ['ALL'])) or
+        (nivel_upper == 'L2' and (('ALL' in bandas_solicitadas or bandas_solicitadas_list == ['ALL']) and ('ALL' in productos_solicitados or productos_solicitados_list == ['ALL'])))
     )
 
     if copiar_tgz_completo:

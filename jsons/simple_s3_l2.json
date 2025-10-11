@@ -1,0 +1,28 @@
+{
+  "nivel": "L2",
+  "productos": [
+    "CMIP",
+    "ADP",
+    "AOD",
+    "ACM",
+    "CODD",
+    "CPSD",
+    "CPSN",
+    "ACHA",
+    "ACTP",
+    "CTP",
+    "ACHT",
+    "LST",
+    "GFLS",
+    "VAAF"
+  ],
+  "bandas": "ALL",
+  "dominio": "conus",
+  "creado_por": "vescudero@geografia.unam.mx",
+  "fechas": {
+    "20230519": [
+      "14:00-14:20"
+    ]
+  }
+}
+
