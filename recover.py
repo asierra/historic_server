@@ -6,7 +6,7 @@ from typing import List, Dict, Iterable, Optional
 from datetime import datetime, timezone
 from pathlib import Path
 from pebble import ProcessPool, ThreadPool
-from concurrent.futures import TimeoutError
+from concurrent.futures import TimeoutError, as_completed
 from database import ConsultasDatabase
 from collections import defaultdict
 import time
@@ -172,61 +172,68 @@ class RecoverFiles:
             directorio_destino.mkdir(exist_ok=True, parents=True)
             self.db.actualizar_estado(consulta_id, "procesando", 10, "Preparando entorno")
 
-            # 2. Descubrir y filtrar archivos locales.
-            # Se elimina la lógica especial para 'ALL' en esta etapa.
-            # La decisión de copiar el tgz completo o extraer se toma por archivo en _process_safe_recover_file.
-            archivos_a_procesar_local = self.lustre.discover_and_filter_files(query_dict)
-            inaccessible_files_local = []  # Si tienes lógica para esto, agrégala aquí
-
-            # 3. Escanear destino
-            if archivos_a_procesar_local:
-                archivos_pendientes_local = self.lustre.scan_existing_files(archivos_a_procesar_local, directorio_destino)
-                if not archivos_pendientes_local:
-                    pass
-            else:
-                archivos_pendientes_local = []
-
-            total_pendientes = len(archivos_pendientes_local)
-            self.db.actualizar_estado(consulta_id, "procesando", 20, f"Identificados {total_pendientes} archivos pendientes de procesar.")
-
             objetivos_fallidos_local = []
-            objetivos_fallidos_local.extend(inaccessible_files_local)
+            archivos_pendientes_local: List[Path] = []
 
-            # 4. Procesar archivos pendientes en paralelo
-            # Extraer bandas y productos originales del request para lógica tgz
-            original_req = query_dict.get('_original_request', {})
-            bandas_original = original_req.get('bandas', query_dict.get('bandas'))
-            productos_original = original_req.get('productos', query_dict.get('productos'))
-            if archivos_pendientes_local:
-                future_to_objetivo = {
-                    self.executor.schedule(
-                        _process_safe_recover_file, 
-                        args=(
-                            archivo_a_procesar, 
-                            directorio_destino, 
-                            query_dict.get('nivel'), 
-                            productos_original, 
-                            bandas_original
-                        ), 
-                        timeout=self.FILE_PROCESSING_TIMEOUT_SECONDS
-                    ): archivo_a_procesar
-                    for i, archivo_a_procesar in enumerate(archivos_pendientes_local)
-                }
-                for i, future in enumerate(future_to_objetivo.keys()):
-                    archivo_fuente = future_to_objetivo[future]
-                    try:
-                        future.result()
-                        mensaje = f"Recuperado archivo {i+1}/{total_pendientes} ({archivo_fuente.name})"
-                    except TimeoutError:
-                        self.logger.error(f"❌ Timeout en archivo {archivo_fuente.name}")
-                        objetivos_fallidos_local.append(archivo_fuente)
-                        mensaje = f"Fallo por timeout {i+1}/{total_pendientes} ({archivo_fuente.name})"
-                    except Exception as e:
-                        self.logger.error(f"❌ Error procesando el archivo {archivo_fuente.name}: {e}")
-                        objetivos_fallidos_local.append(archivo_fuente)
-                        mensaje = f"Fallo {i+1}/{total_pendientes} ({archivo_fuente.name})"
-                    progreso = 20 + int(((i + 1) / total_pendientes) * 60)
-                    self.db.actualizar_estado(consulta_id, "procesando", progreso, mensaje)
+            if self.lustre_enabled:
+                # 2. Descubrir y filtrar archivos locales.
+                # Se elimina la lógica especial para 'ALL' en esta etapa.
+                # La decisión de copiar el tgz completo o extraer se toma por archivo en _process_safe_recover_file.
+                archivos_a_procesar_local = self.lustre.discover_and_filter_files(query_dict)
+                inaccessible_files_local = []  # Si tienes lógica para esto, agrégala aquí
+
+                # 3. Escanear destino
+                if archivos_a_procesar_local:
+                    archivos_pendientes_local = self.lustre.scan_existing_files(archivos_a_procesar_local, directorio_destino)
+                    if not archivos_pendientes_local:
+                        pass
+                else:
+                    archivos_pendientes_local = []
+
+                total_pendientes = len(archivos_pendientes_local)
+                self.db.actualizar_estado(consulta_id, "procesando", 20, f"Identificados {total_pendientes} archivos pendientes de procesar.")
+
+                objetivos_fallidos_local.extend(inaccessible_files_local)
+
+                # 4. Procesar archivos pendientes en paralelo
+                # Extraer bandas y productos originales del request para lógica tgz
+                original_req = query_dict.get('_original_request', {})
+                bandas_original = original_req.get('bandas', query_dict.get('bandas'))
+                productos_original = original_req.get('productos', query_dict.get('productos'))
+                if archivos_pendientes_local:
+                    future_to_objetivo = {
+                        self.executor.schedule(
+                            _process_safe_recover_file, 
+                            args=(
+                                archivo_a_procesar, 
+                                directorio_destino, 
+                                query_dict.get('nivel'), 
+                                productos_original, 
+                                bandas_original
+                            ), 
+                            timeout=self.FILE_PROCESSING_TIMEOUT_SECONDS
+                        ): archivo_a_procesar
+                        for i, archivo_a_procesar in enumerate(archivos_pendientes_local)
+                    }
+                    # Procesar tareas a medida que van completando para evitar bloquearse por una sola tarea lenta
+                    for i, future in enumerate(as_completed(list(future_to_objetivo.keys()))):
+                        archivo_fuente = future_to_objetivo[future]
+                        try:
+                            future.result()
+                            mensaje = f"Recuperado archivo {i+1}/{total_pendientes} ({archivo_fuente.name})"
+                        except TimeoutError:
+                            self.logger.error(f"❌ Timeout en archivo {archivo_fuente.name}")
+                            objetivos_fallidos_local.append(archivo_fuente)
+                            mensaje = f"Fallo por timeout {i+1}/{total_pendientes} ({archivo_fuente.name})"
+                        except Exception as e:
+                            self.logger.error(f"❌ Error procesando el archivo {archivo_fuente.name}: {e}")
+                            objetivos_fallidos_local.append(archivo_fuente)
+                            mensaje = f"Fallo {i+1}/{total_pendientes} ({archivo_fuente.name})"
+                        progreso = 20 + int(((i + 1) / total_pendientes) * 60)
+                        self.db.actualizar_estado(consulta_id, "procesando", progreso, mensaje)
+            else:
+                # Saltar por completo la etapa local si Lustre está deshabilitado
+                self.db.actualizar_estado(consulta_id, "procesando", 20, "Lustre deshabilitado; saltando recuperación local.")
 
             # 5. Recuperar desde S3 si está habilitado
             if self.s3_fallback_enabled:
