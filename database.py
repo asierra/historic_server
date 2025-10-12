@@ -205,6 +205,17 @@ class ConsultasDatabase:
             logging.error(f"Error listando consultas: {e}")
             return []
     
+    def eliminar_consulta(self, consulta_id: str) -> bool:
+        """Elimina una consulta por ID. Devuelve True si se eliminó alguna fila."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.execute("DELETE FROM consultas WHERE id = ?", (consulta_id,))
+                conn.commit()
+                return cur.rowcount > 0
+        except Exception as e:
+            logging.error(f"Error eliminando consulta {consulta_id}: {e}")
+            return False
+    
     def _row_to_dict(self, row) -> Dict:
         """Convierte una fila a diccionario (simplificado)"""
         return {

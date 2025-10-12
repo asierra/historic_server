@@ -364,6 +364,39 @@ class RecoverFiles:
         total_bytes = sum(f.stat().st_size for f in todos_los_archivos if f.is_file())
         tamaño_mb = round(total_bytes / (1024 * 1024), 2)
 
+        # Conteo por producto (basado en el nombre del archivo OR_/CG_ABI-L2-<PROD><DOM>-M6...)
+        from collections import defaultdict as _dd
+        def _extraer_producto_base(nombre: str) -> str:
+            try:
+                # localizar '-L2-' y '-M'
+                i = nombre.index('-L2-') + 4
+                j = nombre.index('-M', i)
+                seg = nombre[i:j]  # puede venir como 'ACMC', 'CMIPC', 'VAAC', etc.
+                # Normalizar: quitar sufijo de dominio (C/F/M1/M2)
+                if seg.endswith('C') or seg.endswith('F'):
+                    seg = seg[:-1]
+                elif seg.endswith('M1') or seg.endswith('M2'):
+                    seg = seg[:-2]
+                # Mapear alias a base solicitada
+                alias = {
+                    'CODD': 'COD', 'CODN': 'COD', 'COD': 'COD',
+                    'CPSD': 'CPS', 'CPSN': 'CPS', 'CPS': 'CPS',
+                    'VAAF': 'VAA', 'VAA': 'VAA',
+                }
+                return alias.get(seg, seg)
+            except Exception:
+                return 'UNKNOWN'
+
+        conteo_total_por_producto = _dd(int)
+        conteo_s3_por_producto = _dd(int)
+
+        for p in all_files_in_destination:
+            prod = _extraer_producto_base(p.name)
+            conteo_total_por_producto[prod] += 1
+        for p in s3_recuperados:
+            prod = _extraer_producto_base(p.name)
+            conteo_s3_por_producto[prod] += 1
+
         # Construir la consulta de recuperación usando el método refactorizado.
         consulta_recuperacion = self._build_recovery_query(consulta_id, objetivos_fallidos, query_original)
 
@@ -383,6 +416,8 @@ class RecoverFiles:
                     "total": len(s3_names_full)
                 }
             },
+            "conteo_por_producto": dict(sorted(conteo_total_por_producto.items())),
+            "conteo_por_producto_s3": dict(sorted(conteo_s3_por_producto.items())),
             "total_archivos": len(todos_los_archivos),
             "tamaño_total_mb": tamaño_mb,
             "directorio_destino": str(directorio_destino),

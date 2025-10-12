@@ -124,7 +124,42 @@ Consulta el estado y progreso de una solicitud en curso.
 }
 ```
 
-Nota: la clave `query` solo aparece cuando el estado es `recibido`. Usa `?detalles=true` si necesitas más contexto. Para reanudar una consulta interrumpida: `POST /query/{consulta_id}/restart`.
+### 3.1 Reiniciar una consulta encolada o atascada (`POST /query/{consulta_id}/restart`)
+
+Reencola una consulta existente para que vuelva a procesarse con la misma configuración original guardada. Útil tras reinicios del servidor o fallos temporales.
+
+- Respuesta de ejemplo:
+```json
+{ "success": true, "message": "La consulta '<ID>' ha sido reenviada para su procesamiento." }
+```
+- Requisitos: la consulta debe existir y estar en estado `procesando`, `error` o `completado`.
+
+### 3.2 Eliminar una consulta (`DELETE /query/{consulta_id}`)
+
+Elimina el registro de una consulta y opcionalmente purga el directorio de trabajo asociado.
+
+Parámetros:
+- `purge` (bool, opcional): si es `true`, elimina el directorio `/data/tmp/<ID>` (o el definido en `HISTORIC_DOWNLOAD_PATH`).
+- `force` (bool, opcional): si es `true`, permite purgar aunque la consulta esté en estado `procesando`.
+
+Ejemplos:
+```bash
+# Eliminar solo el registro de la base
+curl -X DELETE "http://127.0.0.1:9041/query/$ID"
+
+# Eliminar registro y purgar directorio
+curl -X DELETE "http://127.0.0.1:9041/query/$ID?purge=true"
+
+# Forzar la purga aunque esté procesando
+curl -X DELETE "http://127.0.0.1:9041/query/$ID?purge=true&force=true"
+```
+
+Respuestas típicas:
+```json
+{ "success": true, "message": "Registro de consulta eliminado. Directorio purgado." }
+{ "success": true, "message": "Registro de consulta no encontrado. Directorio purgado." }
+```
+- Si no existe el registro y no se indicó `purge`, devuelve 404.
 
 Comando útil para ver detalles en vivo (opcional):
 
@@ -160,6 +195,20 @@ Una vez que el estado es `completado`, usa este endpoint para obtener el reporte
         "fuentes": {
             "lustre": { "archivos": [...], "total": 110 },
             "s3": { "archivos": [...], "total": 2 }
+        },
+        "conteo_por_producto": {
+            "ACHA": 868,
+            "ADP": 436,
+            "COD": 4,
+            "LST": 76,
+            "VAA": 0
+        },
+        "conteo_por_producto_s3": {
+            "ACHA": 860,
+            "ADP": 430,
+            "COD": 4,
+            "LST": 72,
+            "VAA": 0
         },
         "total_archivos": 112,
         "tamaño_total_mb": 12345.67,

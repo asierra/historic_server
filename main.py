@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from config import SatelliteConfigGOES
 import uvicorn
 import os
+import shutil
 import secrets
 import string
 from pebble import ProcessPool
@@ -420,6 +421,49 @@ async def listar_consultas(
         "total": len(consultas_simples),
         "consultas": consultas_simples
     }
+
+@app.delete("/query/{consulta_id}")
+async def eliminar_consulta(consulta_id: str, purge: bool = False, force: bool = False):
+    """
+    Elimina una consulta de la base de datos. Opcionalmente purga el directorio de trabajo.
+    - purge=true para eliminar / purgar el directorio de archivos asociado a la consulta.
+    - force=true para permitir purge aunque la consulta esté en estado 'procesando'.
+    """
+    consulta = db.obtener_consulta(consulta_id)
+
+    # Purga opcional del directorio asociado a la consulta
+    if purge:
+        # Bloquear purga si está procesando y no se forzó
+        if consulta and (consulta.get("estado") == "procesando") and not force:
+            raise HTTPException(
+                status_code=409,
+                detail="La consulta está en proceso; use force=true para purgar de todas formas."
+            )
+        try:
+            dest_dir = os.path.join(DOWNLOAD_PATH, consulta_id)
+            base = os.path.abspath(DOWNLOAD_PATH)
+            target = os.path.abspath(dest_dir)
+            if not target.startswith(base + os.sep) and target != base:
+                raise HTTPException(status_code=400, detail="Ruta de destino inválida para purge.")
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error purgando directorio: {e}")
+
+    # Eliminar registro en DB (si existe)
+    ok = db.eliminar_consulta(consulta_id)
+    if not ok and not purge:
+        # Si no se solicitó purge y no hay registro en DB, devolver 404
+        raise HTTPException(status_code=404, detail="Consulta no encontrada o ya eliminada.")
+
+    # Mensaje consolidado
+    partes = []
+    partes.append("Registro de consulta eliminado." if ok else "Registro de consulta no encontrado.")
+    if purge:
+        partes.append("Directorio purgado.")
+    return {"success": True, "message": " ".join(partes)}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9041)
