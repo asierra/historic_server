@@ -253,8 +253,8 @@ async def validar_solicitud(request_data: Dict[str, Any] = Body(...)):
         query_obj = processor.procesar_request(data, config)
         query_dict = query_obj.to_dict() # Mantenemos to_dict si es un método custom de la dataclass
 
-        # 3. Estimar la cantidad de archivos usando el método de la config
-        file_estimate = config.estimate_file_count(data)
+        # 3. Estimar archivos y tamaño usando el método completo de la config
+        estimation_summary = config.estimate_files_summary(data)
 
         return {
             "success": True,
@@ -266,7 +266,8 @@ async def validar_solicitud(request_data: Dict[str, Any] = Body(...)):
                 "total_fechas_expandidas": query_dict['total_fechas_expandidas'],
                 "total_horas": query_dict['total_horas'],
                 "bandas_procesadas": query_dict['bandas'],
-                "archivos_estimados": file_estimate
+                "archivos_estimados": estimation_summary["file_count"],
+                "tamanio_estimado": estimation_summary["total_size_mb"]
             }
         }
     except ValueError as e:
