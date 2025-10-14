@@ -11,6 +11,10 @@ from database import ConsultasDatabase
 from collections import defaultdict
 import time
 from s3_recover import S3RecoverFiles
+from config import SatelliteConfigGOES
+
+# Instanciar configuración para referenciar listas válidas (bandas/productos)
+_SAT_CONFIG = SatelliteConfigGOES()
 
 
 def filter_files_by_time(archivos_nc: list, fecha_jjj: str, horarios_list: list) -> list:
@@ -526,12 +530,28 @@ def _process_safe_recover_file(archivo_fuente: Path, directorio_destino: Path, n
         bandas_solicitadas_list = [bandas_solicitadas_list]
     productos_solicitados = set(p.upper() for p in (productos_solicitados_list or []))
     bandas_solicitadas = set(bandas_solicitadas_list or [])
+    # Detectar si la consulta originalmente pidió 'ALL' aunque la request ya haya
+    # sido expandida a la lista completa de bandas/productos. Usamos la config
+    # para comparar contra el conjunto completo de valores válidos.
+    productos_all_set = set(p.upper() for p in _SAT_CONFIG.VALID_PRODUCTS)
+    bandas_all_set = set(_SAT_CONFIG.VALID_BANDAS)
     nivel_upper = (nivel or "").upper()
 
     # --- Lógica de decisión: Copiar .tgz completo vs. Extracción selectiva ---
+    # Basado en las reglas definidas:
+    # 1. L1b y bandas="ALL" -> Copiar .tgz completo.
+    # 2. L2, bandas="ALL" y productos="ALL" -> Copiar .tgz completo.
+    # 3. En todos los demás casos, se debe extraer selectivamente.
+    
+    # Considerar que se pidió 'ALL' cuando:
+    # - la lista contiene literalmente 'ALL' (caso no expandido), o
+    # - la lista equivale exactamente al conjunto válido completo (caso expandido)
+    bandas_indican_all = ('ALL' in bandas_solicitadas) or (bandas_solicitadas == bandas_all_set)
+    productos_indican_all = ('ALL' in productos_solicitados) or (productos_solicitados == productos_all_set)
+
     copiar_tgz_completo = (
-        (nivel_upper == 'L1B' and ('ALL' in bandas_solicitadas or bandas_solicitadas_list == ['ALL'])) or
-        (nivel_upper == 'L2' and (('ALL' in bandas_solicitadas or bandas_solicitadas_list == ['ALL']) and ('ALL' in productos_solicitados or productos_solicitados_list == ['ALL'])))
+        (nivel_upper == 'L1B' and bandas_indican_all) or
+        (nivel_upper == 'L2' and bandas_indican_all and productos_indican_all)
     )
 
     if copiar_tgz_completo:
@@ -546,8 +566,9 @@ def _process_safe_recover_file(archivo_fuente: Path, directorio_destino: Path, n
             miembros_a_extraer = []
 
             # Determinar qué bandas usar para productos CMI
-            # Si se pidió 'ALL', se usan todas (1-16). Si no, se usan las especificadas.
-            bandas_para_cmi = {f"{i:02d}" for i in range(1, 17)} if 'ALL' in bandas_solicitadas else bandas_solicitadas
+            # Si se pidió 'ALL' (o la lista ya fue expandida a todas las bandas),
+            # se usan todas (01-16). Si no, se usan las especificadas.
+            bandas_para_cmi = set(bandas_all_set) if (('ALL' in bandas_solicitadas) or (bandas_solicitadas == bandas_all_set)) else bandas_solicitadas
 
             # Iterar sobre cada archivo dentro del .tgz
             for miembro in miembros_del_tar:
