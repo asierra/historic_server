@@ -221,10 +221,12 @@ class SatelliteConfigGOES(SatelliteConfigBase):
         items_to_process = []
         if nivel == "L1b":
             bandas = request_data.get("bandas", [])
-            if "ALL" in bandas:
+            # Normalizar a mayúsculas para comparación
+            bandas_upper = [str(b).upper() for b in bandas] if bandas else []
+            if "ALL" in bandas_upper:
                 items_to_process = self.VALID_BANDAS
             else:
-                items_to_process = bandas if bandas else ["C02"]  # Default a C02 si no se especifica
+                items_to_process = bandas if bandas else ["02"]  # Default a banda 02 si no se especifica
         elif nivel == "L2":
             productos = request_data.get("productos", [])
             if not productos:
@@ -233,7 +235,8 @@ class SatelliteConfigGOES(SatelliteConfigBase):
             # Para CMIP, generar items por cada banda
             if "CMIP" in productos:
                 bandas = request_data.get("bandas", [])
-                if "ALL" in bandas or not bandas:
+                bandas_upper = [str(b).upper() for b in bandas] if bandas else []
+                if "ALL" in bandas_upper or not bandas:
                     # CMIP genera un archivo por cada banda
                     items_to_process.extend([f"CMIP_C{i:02d}" for i in range(1, 17)])
                 else:
@@ -336,10 +339,12 @@ class SatelliteConfigGOES(SatelliteConfigBase):
         items_to_process = []
         if nivel == "L1b":
             bandas = request_data.get("bandas", [])
-            if "ALL" in bandas:
+            # Normalizar a mayúsculas para comparación
+            bandas_upper = [str(b).upper() for b in bandas] if bandas else []
+            if "ALL" in bandas_upper:
                 items_to_process = self.VALID_BANDAS
             else:
-                items_to_process = bandas if bandas else ["C02"]
+                items_to_process = bandas if bandas else ["02"]
         elif nivel == "L2":
             productos = request_data.get("productos", [])
             if not productos:
@@ -348,7 +353,8 @@ class SatelliteConfigGOES(SatelliteConfigBase):
             # Para CMIP, generar items por cada banda
             if "CMIP" in productos:
                 bandas = request_data.get("bandas", [])
-                if "ALL" in bandas or not bandas:
+                bandas_upper = [str(b).upper() for b in bandas] if bandas else []
+                if "ALL" in bandas_upper or not bandas:
                     items_to_process.extend([f"CMIP_C{i:02d}" for i in range(1, 17)])
                 else:
                     items_to_process.extend([f"CMIP_{banda}" for banda in bandas])
