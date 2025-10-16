@@ -64,7 +64,7 @@ ENV_FILE=.env.v1 uvicorn main:app --host 0.0.0.0 --port 9041
 
 ## Uso de la API
 
-**Ejemplo de Solicitud (L1b):**
+**Ejemplo 1: Solicitud L1b:**
 ```json
 {
     "sat": "GOES-16",
@@ -78,7 +78,7 @@ ENV_FILE=.env.v1 uvicorn main:app --host 0.0.0.0 --port 9041
 }
 ```
 
-**Ejemplo de Solicitud avanzada:**
+**Ejemplo 2: Solicitud L2:**
 ```json
 {
     "sat": "GOES-16",
@@ -96,11 +96,19 @@ ENV_FILE=.env.v1 uvicorn main:app --host 0.0.0.0 --port 9041
 
 Verifica si una consulta es válida sin ejecutarla.
 
-
+**Respuesta al ejemplo 1:**
+```json
+{
+  "success": true,
+  "message": "La solicitud es válida.",
+  "archivos_estimados": 40,
+  "tamanio_estimado_mb": 1580.0
+}
+```
 
 ### 2. Crear una consulta (`POST /query`)
 
-Envía la solicitud para ser procesada en segundo plano. Devuelve un `consulta_id`.
+Envía la solicitud para ser procesada en segundo plano. Devuelve una `consulta_id`.
 
 **Respuesta:**
 ```json
@@ -134,19 +142,22 @@ Consulta el estado y progreso de una solicitud en curso.
     "estado": "completado",
     "progreso": 100,
     "mensaje": "Recuperación: T=112, L=110, S=2",
+    "total_archivos":112,
+    "archivos_lustre":110,
+    "archivos_s3":2,
     "timestamp": "2023-11-20T15:35:10.654321"
 }
 ```
 
 ### 3.1 Reiniciar una consulta encolada o atascada (`POST /query/{consulta_id}/restart`)
 
-Reencola una consulta existente para que vuelva a procesarse con la misma configuración original guardada. Útil tras reinicios del servidor o fallos temporales.
+Reencola una consulta existente para que vuelva a procesarse con la misma configuración original guardada. Útil tras reinicios del servidor o fallas temporales. No vuelve a traer archivos que ya existan en la carpeta destino.
 
-- Respuesta de ejemplo:
+**Respuesta de ejemplo:**
 ```json
 { "success": true, "message": "La consulta '<ID>' ha sido reenviada para su procesamiento." }
 ```
-- Requisitos: la consulta debe existir y estar en estado `procesando`, `error` o `completado`.
+Requisitos: la consulta debe existir y estar en estado `procesando`, `error` o `completado`.
 
 ### 3.2 Eliminar una consulta (`DELETE /query/{consulta_id}`)
 
