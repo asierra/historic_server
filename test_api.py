@@ -122,6 +122,17 @@ def test_validate_l2_acha_without_bandas_is_valid():
     if isinstance(body, dict) and "success" in body:
         assert body["success"] is True
 
+def test_validate_future_date_is_invalid():
+    """Prueba que una solicitud con una fecha en el futuro falla."""
+    future_date_request = {
+        "sat": "GOES-16",
+        "nivel": "L1b",
+        "dominio": "fd",
+        "fechas": { "20990101": ["12:00"] } # Fecha lejana en el futuro
+    }
+    response = client.post("/validate", json=future_date_request)
+    assert response.status_code == 400
+    assert "está en el futuro y no es válida" in response.json()["detail"]
 # --- Pruebas para el endpoint /query ---
 
 def test_query_success(monkeypatch):

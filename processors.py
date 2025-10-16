@@ -147,6 +147,21 @@ class HistoricQueryProcessor:
                 tiempo = datetime.strptime(horario_str, "%H:%M").time()
                 return Horario(tiempo, tiempo)
         
+        # Validar que ninguna fecha esté en el futuro
+        today = datetime.now().date()
+        for fecha_str in request_data.get('fechas', {}).keys():
+            # Usar el final del rango para la validación
+            fecha_a_validar_str = fecha_str.split('-')[-1]
+            try:
+                fecha_a_validar = datetime.strptime(fecha_a_validar_str, "%Y%m%d").date()
+                if fecha_a_validar > today:
+                    raise ValueError(f"La fecha '{fecha_a_validar.strftime('%Y-%m-%d')}' está en el futuro y no es válida.")
+            except ValueError as e:
+                # Relanzar el error de fecha futura o el de formato incorrecto
+                if "futuro" in str(e):
+                    raise e
+                raise ValueError(f"Formato de fecha inválido en la clave: '{fecha_str}'. Se esperaba 'YYYYMMDD' o 'YYYYMMDD-YYYYMMDD'.")
+
         # Convertir fechas
         fechas = []
         for fecha_str, horarios_str in request_data['fechas'].items():
@@ -154,8 +169,8 @@ class HistoricQueryProcessor:
                 horarios = [parsear_horario(h) for h in horarios_str]
                 fechas.append(Fecha(fecha_str, horarios))
             except ValueError:
-                # Captura errores si el formato de fecha (clave) es incorrecto
-                raise ValueError(f"Formato de fecha inválido: '{fecha_str}'. Se esperaba 'YYYYMMDD' o 'YYYYMMDD-YYYYMMDD'.")
+                # Este bloque ahora es para otros errores de parseo, ya que el formato de fecha se pre-valida arriba.
+                raise ValueError(f"Error procesando horarios para la fecha '{fecha_str}'.")
         
         # Los datos ya vienen validados y con valores por defecto.
         # Guardar valores originales antes de expandir
