@@ -24,7 +24,7 @@ Permitir que usuarios y sistemas externos puedan generar consultas complejas de 
 *   **Modo de Simulación**: Incluye un modo `simulador` para desarrollo y pruebas sin necesidad de acceder al sistema de archivos real, con tasas de éxito configurables.
 *   **Monitoreo de Salud**: Endpoint `/health` que verifica el estado de la base de datos y la accesibilidad al almacenamiento primario.
 *   **Filtrado Preciso por Hora y Minuto**: Permite solicitar archivos dentro de intervalos específicos de hora y minuto, tanto en almacenamiento local como en S3.
-*   **Consultas Multi-Producto y Multi-Dominio**: Soporta solicitudes que incluyan varios productos L2 y diferentes dominios (ej. `fd`, `conus`) en una sola consulta.
+*   **Consultas Multi-Producto**: Soporta solicitudes que incluyan varias bandas y productos L2 en una sola consulta.
 
 ## Configuración
 
