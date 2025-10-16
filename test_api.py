@@ -83,8 +83,9 @@ def test_validate_success():
     data = response.json()
     assert data["success"] is True
     assert data["message"] == "La solicitud es válida."
-    assert data["resumen_solicitud"]["satelite"] == "GOES-16"
-    assert data["resumen_solicitud"]["total_fechas_expandidas"] == 3
+    # Verificar la nueva estructura plana
+    assert "archivos_estimados" in data
+    assert "tamanio_estimado_mb" in data
 
 def test_validate_invalid_satellite():
     """Prueba que una solicitud con un satélite no soportado falla."""
@@ -193,6 +194,11 @@ def test_query_and_get_status(monkeypatch):
     # 3. Verificar el estado final y obtener los resultados
     assert get_data["estado"] == "completado"
     assert get_data["progreso"] == 100
+    # Verificar que los campos de resumen están en la respuesta de estado completado
+    assert "total_archivos" in get_data
+    assert "archivos_lustre" in get_data
+    assert "archivos_s3" in get_data
+    assert get_data["total_archivos"] == get_data["archivos_lustre"] + get_data["archivos_s3"]
 
     results_response = client.get(f"/query/{TEST_ID}?resultados=True")
     assert results_response.status_code == 200

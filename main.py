@@ -259,16 +259,8 @@ async def validar_solicitud(request_data: Dict[str, Any] = Body(...)):
         return {
             "success": True,
             "message": "La solicitud es válida.",
-            "resumen_solicitud": {
-                "satelite": query_dict['satelite'],
-                "sensor": query_dict['sensor'],
-                "nivel": query_dict['nivel'],
-                "total_fechas_expandidas": query_dict['total_fechas_expandidas'],
-                "total_horas": query_dict['total_horas'],
-                "bandas_procesadas": query_dict['bandas'],
-                "archivos_estimados": estimation_summary["file_count"],
-                "tamanio_estimado": estimation_summary["total_size_mb"]
-            }
+            "archivos_estimados": estimation_summary["file_count"],
+            "tamanio_estimado_mb": estimation_summary["total_size_mb"]
         }
     except ValueError as e:
         # Convertir errores de validación de lógica de negocio en 400
@@ -336,6 +328,17 @@ async def obtener_consulta(
     }
     if consulta["estado"] == "recibido":
         resp["query"] = consulta["query"]
+    
+    # Si está completado, enriquecer la respuesta con los totales del reporte
+    if consulta["estado"] == "completado" and consulta.get("resultados"):
+        resultados = consulta["resultados"]
+        fuentes = resultados.get("fuentes", {})
+        lustre_info = fuentes.get("lustre", {})
+        s3_info = fuentes.get("s3", {})
+        
+        resp["total_archivos"] = resultados.get("total_archivos", 0)
+        resp["archivos_lustre"] = lustre_info.get("total", 0)
+        resp["archivos_s3"] = s3_info.get("total", 0)
 
     # Enriquecer con detalles de progreso solo si se solicita
     if detalles:

@@ -204,70 +204,57 @@ class SatelliteConfigGOES(SatelliteConfigBase):
         
         return base_weight
 
-    def estimate_file_count(self, request_data: Dict[str, Any]) -> int:
+    def _calculate_files_per_item(self, request_data: Dict[str, Any]) -> Dict[str, int]:
         """
-        Estima la cantidad de archivos que se recuperarán basándose en la periodicidad específica
-        de cada producto/banda según goes_typical.csv.
+        Calcula el número de archivos por cada item (banda/producto) en la solicitud.
+        Esta es la lógica central de estimación, reutilizada por count y size.
         """
         nivel = request_data.get("nivel")
         if nivel not in ["L1b", "L2"]:
-            return 0
+            return {}
 
         dominio = request_data.get("dominio")
         fechas_dict = request_data.get("fechas", {})
-        total_files = 0
+        files_per_item = {}
 
         # Obtener items a procesar (productos para L2, bandas para L1b)
         items_to_process = []
         if nivel == "L1b":
             bandas = request_data.get("bandas", [])
-            # Normalizar a mayúsculas para comparación
             bandas_upper = [str(b).upper() for b in bandas] if bandas else []
             if "ALL" in bandas_upper:
                 items_to_process = self.VALID_BANDAS
             else:
-                items_to_process = bandas if bandas else ["02"]  # Default a banda 02 si no se especifica
+                items_to_process = bandas if bandas else ["02"]
         elif nivel == "L2":
-            productos = request_data.get("productos", [])
-            if not productos:
-                return 0
-            
-            # Para CMIP, generar items por cada banda
+            # Asegurarse de que productos sea una lista, incluso si es None en el request
+            productos = request_data.get("productos") or []
             if "CMIP" in productos:
                 bandas = request_data.get("bandas", [])
                 bandas_upper = [str(b).upper() for b in bandas] if bandas else []
                 if "ALL" in bandas_upper or not bandas:
-                    # CMIP genera un archivo por cada banda
                     items_to_process.extend([f"CMIP_C{i:02d}" for i in range(1, 17)])
                 else:
                     items_to_process.extend([f"CMIP_{banda}" for banda in bandas])
-                
-                # Remover CMIP de la lista de productos para evitar doble conteo
                 productos = [p for p in productos if p != "CMIP"]
-            
-            # Agregar otros productos (no CMIP)
             items_to_process.extend(productos)
+
+        for item in items_to_process:
+            files_per_item[item] = 0
 
         # Procesar cada fecha y horario
         for fecha_key, horarios_list in fechas_dict.items():
-            # Expandir rangos de fechas
             try:
                 if '-' in fecha_key:
                     start_date_str, end_date_str = fecha_key.split('-')
                     start_date = datetime.strptime(start_date_str, "%Y%m%d")
                     end_date = datetime.strptime(end_date_str, "%Y%m%d")
-                    
-                    current_date = start_date
-                    date_range = []
-                    while current_date <= end_date:
-                        date_range.append(current_date)
-                        current_date += timedelta(days=1)
+                    date_range = [start_date + timedelta(days=x) for x in range((end_date - start_date).days + 1)]
                 else:
                     date_range = [datetime.strptime(fecha_key, "%Y%m%d")]
             except ValueError:
                 continue
 
-            # Procesar cada día y horario
             for date_obj in date_range:
                 for horario_str in horarios_list:
                     parts = horario_str.split('-')
@@ -276,47 +263,38 @@ class SatelliteConfigGOES(SatelliteConfigBase):
 
                     start_minute = start_t.hour * 60 + start_t.minute
                     end_minute = end_t.hour * 60 + end_t.minute
+                    minute_range = (end_minute - start_minute + 1) if end_minute >= start_minute else (1440 - start_minute) + end_minute + 1
 
-                    # Contar archivos para cada item (producto/banda)
                     for item in items_to_process:
-                        # Para items CMIP_Cxx, usar periodicidad de CMIP
                         lookup_item = "CMIP" if item.startswith("CMIP_") else item
-                        
                         periodicity = self.get_periodicity(nivel, dominio, lookup_item)
                         
-                        # Contar cuántos archivos se generan en el rango horario
-                        # Manejar casos donde el rango puede cruzar medianoche
-                        if end_minute >= start_minute:
-                            # Rango normal dentro del mismo día
-                            minute_range = end_minute - start_minute + 1
-                        else:
-                            # Rango que cruza medianoche (ej: 23:00-01:00)
-                            minute_range = (1440 - start_minute) + end_minute + 1
-                        
-                        # Calcular archivos basándose en la periodicidad y dominio
                         files_in_range = 0
                         current_minute = start_minute
-                        
                         for _ in range(minute_range):
-                            actual_minute = current_minute % 1440  # Manejar wrap-around de 24h
-                            
-                            # Aplicar lógica específica según dominio
+                            actual_minute = current_minute % 1440
                             should_include = False
                             if dominio == 'fd':
-                                # Full Disk: archivos en minutos múltiplos de la periodicidad (0, 10, 20, etc.)
                                 should_include = (actual_minute % periodicity == 0)
                             elif dominio == 'conus':
-                                # CONUS: archivos cada 5 mins, en minutos terminados en 1 o 6
                                 minute_mod_10 = actual_minute % 10
                                 should_include = (minute_mod_10 == 1 or minute_mod_10 == 6)
-                            
                             if should_include:
                                 files_in_range += 1
                             current_minute += 1
-                        
-                        total_files += files_in_range
+                        files_per_item[item] += files_in_range
+        return files_per_item
 
-        return total_files
+    def estimate_file_count(self, request_data: Dict[str, Any]) -> int:
+        """
+        Estima la cantidad de archivos que se recuperarán basándose en la periodicidad específica
+        de cada producto/banda según goes_typical.csv.
+        """
+        nivel = request_data.get("nivel")
+        if not nivel or not request_data.get("fechas"):
+            return 0
+        files_per_item = self._calculate_files_per_item(request_data)
+        return sum(files_per_item.values())
 
     def estimate_files_size(self, request_data: Dict[str, Any]) -> float:
         """
@@ -328,106 +306,17 @@ class SatelliteConfigGOES(SatelliteConfigBase):
             Tamaño estimado total en MB
         """
         nivel = request_data.get("nivel")
-        if nivel not in ["L1b", "L2"]:
+        if not nivel or not request_data.get("fechas"):
             return 0.0
 
         dominio = request_data.get("dominio")
-        fechas_dict = request_data.get("fechas", {})
         total_size_mb = 0.0
 
-        # Obtener items a procesar (productos para L2, bandas para L1b)
-        items_to_process = []
-        if nivel == "L1b":
-            bandas = request_data.get("bandas", [])
-            # Normalizar a mayúsculas para comparación
-            bandas_upper = [str(b).upper() for b in bandas] if bandas else []
-            if "ALL" in bandas_upper:
-                items_to_process = self.VALID_BANDAS
-            else:
-                items_to_process = bandas if bandas else ["02"]
-        elif nivel == "L2":
-            productos = request_data.get("productos", [])
-            if not productos:
-                return 0.0
-            
-            # Para CMIP, generar items por cada banda
-            if "CMIP" in productos:
-                bandas = request_data.get("bandas", [])
-                bandas_upper = [str(b).upper() for b in bandas] if bandas else []
-                if "ALL" in bandas_upper or not bandas:
-                    items_to_process.extend([f"CMIP_C{i:02d}" for i in range(1, 17)])
-                else:
-                    items_to_process.extend([f"CMIP_{banda}" for banda in bandas])
-                
-                productos = [p for p in productos if p != "CMIP"]
-            
-            items_to_process.extend(productos)
-
-        # Procesar cada fecha y horario
-        for fecha_key, horarios_list in fechas_dict.items():
-            # Expandir rangos de fechas
-            try:
-                if '-' in fecha_key:
-                    start_date_str, end_date_str = fecha_key.split('-')
-                    start_date = datetime.strptime(start_date_str, "%Y%m%d")
-                    end_date = datetime.strptime(end_date_str, "%Y%m%d")
-                    
-                    current_date = start_date
-                    date_range = []
-                    while current_date <= end_date:
-                        date_range.append(current_date)
-                        current_date += timedelta(days=1)
-                else:
-                    date_range = [datetime.strptime(fecha_key, "%Y%m%d")]
-            except ValueError:
-                continue
-
-            # Procesar cada día y horario
-            for date_obj in date_range:
-                for horario_str in horarios_list:
-                    parts = horario_str.split('-')
-                    start_t = datetime.strptime(parts[0], "%H:%M").time()
-                    end_t = datetime.strptime(parts[1], "%H:%M").time() if len(parts) > 1 else start_t
-
-                    start_minute = start_t.hour * 60 + start_t.minute
-                    end_minute = end_t.hour * 60 + end_t.minute
-
-                    # Calcular tamaño para cada item (producto/banda)
-                    for item in items_to_process:
-                        # Para items CMIP_Cxx, usar periodicidad y peso de CMIP
-                        lookup_item = "CMIP" if item.startswith("CMIP_") else item
-                        
-                        periodicity = self.get_periodicity(nivel, dominio, lookup_item)
-                        file_weight = self.get_file_weight(nivel, dominio, lookup_item)
-                        
-                        # Contar archivos en este rango horario
-                        if end_minute >= start_minute:
-                            minute_range = end_minute - start_minute + 1
-                        else:
-                            minute_range = (1440 - start_minute) + end_minute + 1
-                        
-                        files_in_range = 0
-                        current_minute = start_minute
-                        
-                        for _ in range(minute_range):
-                            actual_minute = current_minute % 1440
-                            
-                            # Aplicar lógica específica según dominio
-                            should_include = False
-                            if dominio == 'fd':
-                                # Full Disk: archivos en minutos múltiplos de la periodicidad
-                                should_include = (actual_minute % periodicity == 0)
-                            elif dominio == 'conus':
-                                # CONUS: archivos cada 5 mins, en minutos terminados en 1 o 6
-                                minute_mod_10 = actual_minute % 10
-                                should_include = (minute_mod_10 == 1 or minute_mod_10 == 6)
-                            
-                            if should_include:
-                                files_in_range += 1
-                            current_minute += 1
-                        
-                        # Sumar el tamaño total para este item
-                        total_size_mb += files_in_range * file_weight
+        files_per_item = self._calculate_files_per_item(request_data)
+        for item, count in files_per_item.items():
+            lookup_item = "CMIP" if item.startswith("CMIP_") else item
+            file_weight = self.get_file_weight(nivel, dominio, lookup_item)
+            total_size_mb += count * file_weight
 
         return total_size_mb
 

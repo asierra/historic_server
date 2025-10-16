@@ -64,15 +64,12 @@ ENV_FILE=.env.v1 uvicorn main:app --host 0.0.0.0 --port 9041
 
 ## Uso de la API
 
-### 1. Validar una solicitud (`POST /validate`)
-
-Verifica si una consulta es válida sin ejecutarla.
-
-**Ejemplo de Solicitud:**
+**Ejemplo de Solicitud (L1b):**
 ```json
 {
     "sat": "GOES-16",
     "nivel": "L1b",
+    "dominio": "fd",
     "bandas": ["02", "13"],
     "fechas": {
         "20231026": ["00:00-01:00", "15:30"],
@@ -95,6 +92,12 @@ Verifica si una consulta es válida sin ejecutarla.
 }
 ```
 
+### 1. Validar una solicitud (`POST /validate`)
+
+Verifica si una consulta es válida sin ejecutarla.
+
+
+
 ### 2. Crear una consulta (`POST /query`)
 
 Envía la solicitud para ser procesada en segundo plano. Devuelve un `consulta_id`.
@@ -113,14 +116,25 @@ Envía la solicitud para ser procesada en segundo plano. Devuelve un `consulta_i
 
 Consulta el estado y progreso de una solicitud en curso.
 
-**Respuesta:**
+**Respuesta (en proceso):**
 ```json
 {
     "consulta_id": "aBcDeF12",
     "estado": "procesando",
     "progreso": 45,
     "mensaje": "Recuperando archivo 50/112",
-    ...
+    "timestamp": "2023-11-20T15:30:00.123456"
+}
+```
+
+**Respuesta (completado):**
+```json
+{
+    "consulta_id": "aBcDeF12",
+    "estado": "completado",
+    "progreso": 100,
+    "mensaje": "Recuperación: T=112, L=110, S=2",
+    "timestamp": "2023-11-20T15:35:10.654321"
 }
 ```
 

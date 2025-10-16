@@ -1,0 +1,12 @@
+{
+  "nivel": "L2",
+  "productos": ["ACM", "SST"],
+  "bandas": "ALL",
+  "dominio": "fd",
+  "creado_por": "asierra@unam.mx",
+  "fechas": {
+    "20240510-20240520": [
+      "18:00"
+    ]
+  }
+}
