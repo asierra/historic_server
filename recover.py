@@ -396,10 +396,12 @@ class RecoverFiles:
 
         for p in all_files_in_destination:
             prod = _extraer_producto_base(p.name)
-            conteo_total_por_producto[prod] += 1
+            if prod != 'UNKNOWN':
+                conteo_total_por_producto[prod] += 1
         for p in s3_recuperados:
             prod = _extraer_producto_base(p.name)
-            conteo_s3_por_producto[prod] += 1
+            if prod != 'UNKNOWN':
+                conteo_s3_por_producto[prod] += 1
 
         # Construir la consulta de recuperación usando el método refactorizado.
         consulta_recuperacion = self._build_recovery_query(consulta_id, objetivos_fallidos, query_original)
@@ -423,8 +425,8 @@ class RecoverFiles:
             "conteo_por_producto": dict(sorted(conteo_total_por_producto.items())),
             "conteo_por_producto_s3": dict(sorted(conteo_s3_por_producto.items())),
             "total_archivos": len(todos_los_archivos),
-            "tamaño_total_mb": tamaño_mb,
-            "directorio_destino": str(directorio_destino),
+            "total_mb": tamaño_mb,
+            "ruta_destino": str(directorio_destino),
             "timestamp_procesamiento": datetime.now().isoformat(),
             "consulta_recuperacion": consulta_recuperacion
         }

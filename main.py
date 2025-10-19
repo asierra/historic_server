@@ -300,7 +300,6 @@ async def reiniciar_consulta(consulta_id: str, background_tasks: BackgroundTasks
 async def obtener_consulta(
     consulta_id: str,
     resultados: bool = False,
-    detalles: bool = False,
 ):
     """
     ✅ ENDPOINT ÚNICO PARA CONSULTAR: Estado y resultados
@@ -340,64 +339,40 @@ async def obtener_consulta(
         resp["archivos_lustre"] = lustre_info.get("total", 0)
         resp["archivos_s3"] = s3_info.get("total", 0)
 
-    # Enriquecer con detalles de progreso solo si se solicita
-    if detalles:
-        try:
-            dest_dir = os.path.join(DOWNLOAD_PATH, consulta_id)
-            archivos = []
-            total_bytes = 0
-            if os.path.isdir(dest_dir):
-                for nombre in os.listdir(dest_dir):
-                    ruta = os.path.join(dest_dir, nombre)
-                    if os.path.isfile(ruta):
-                        archivos.append(nombre)
-                        try:
-                            total_bytes += os.path.getsize(ruta)
-                        except OSError:
-                            pass
+    # --- Enriquecer siempre la respuesta con ruta y tamaño (si está completado) ---
+    try:
+        dest_dir = os.path.join(DOWNLOAD_PATH, consulta_id)
+        resp["ruta_destino"] = dest_dir
+        resp["total_mb"] = None  # Por defecto es null
 
-            detalles_obj: Dict[str, Any] = {
-                "archivos_en_directorio": len(archivos),
-                "tamaño_descargado_mb": round(total_bytes / (1024 * 1024), 2),
-            }
+        if consulta["estado"] == "completado" and consulta.get("resultados"):
+            resultados = consulta["resultados"]
+            resp["total_mb"] = resultados.get("total_mb", 0)
 
-            # Derivar etapa a partir del mensaje
-            msg = (consulta.get("mensaje") or "").lower()
-            if "preparando entorno" in msg:
-                etapa = "preparando"
-            elif "identificados" in msg or "procesando archivo" in msg or "recuperando archivo" in msg:
-                etapa = "recuperando-local"
-            elif "descargas s3 pendientes" in msg:
-                etapa = "s3-listado"
-            elif "descargando de s3" in msg or "descarga s3" in msg:
-                etapa = "s3-descargando"
-            elif "reporte final" in msg:
-                etapa = "finalizando"
-            elif consulta["estado"] == "completado":
-                etapa = "completado"
-            elif consulta["estado"] == "error":
-                etapa = "error"
-            else:
-                etapa = "desconocida"
-            detalles_obj["etapa"] = etapa
+        # Derivar etapa a partir del mensaje para dar más contexto
+        msg = (consulta.get("mensaje") or "").lower()
+        if "preparando entorno" in msg:
+            etapa = "preparando"
+        elif "identificados" in msg or "procesando archivo" in msg or "recuperando archivo" in msg:
+            etapa = "recuperando-local"
+        elif "descargas s3 pendientes" in msg:
+            etapa = "s3-listado"
+        elif "descargando de s3" in msg or "descarga s3" in msg:
+            etapa = "s3-descargando"
+        elif "reporte final" in msg:
+            etapa = "finalizando"
+        elif consulta["estado"] in ["completado", "error"]:
+            etapa = consulta["estado"]
+        else:
+            etapa = "desconocida"
+        resp["etapa"] = etapa
 
-            # Intentar extraer contadores de S3 del mensaje
-            m_pend = re.search(r"Descargas S3 pendientes: (\d+)", consulta.get("mensaje") or "")
-            if m_pend:
-                detalles_obj["s3_pendientes"] = int(m_pend.group(1))
+    except Exception:
+        # No bloquear la respuesta si hay errores leyendo el FS
+        resp["ruta_destino"] = None
+        resp["total_mb"] = None
+        resp["etapa"] = "error_lectura_fs"
 
-            m_progress = re.search(r"Descarga S3 (\d+)/(\d+)", consulta.get("mensaje") or "")
-            if m_progress:
-                detalles_obj["s3_descarga_actual"] = {
-                    "completadas": int(m_progress.group(1)),
-                    "total": int(m_progress.group(2))
-                }
-
-            if detalles_obj:
-                resp["detalles"] = detalles_obj
-        except Exception:
-            # No bloquear la respuesta si hay errores leyendo el FS
-            pass
     return resp
 
 @app.get("/queries")
