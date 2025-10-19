@@ -1,6 +1,7 @@
 import os
 import logging
 import shutil
+import re
 import tarfile
 from typing import List, Dict, Iterable, Optional
 from datetime import datetime, timezone
@@ -12,9 +13,13 @@ from collections import defaultdict
 import time
 from s3_recover import S3RecoverFiles
 from config import SatelliteConfigGOES
+from utils.env import env_bool
 
 # Instanciar configuración para referenciar listas válidas (bandas/productos)
 _SAT_CONFIG = SatelliteConfigGOES()
+
+# Expresión regular para extraer el timestamp de inicio del nombre de archivo
+_FILENAME_TIMESTAMP_RE = re.compile(r'_s(\d{4})(\d{3})(\d{2})\d+.*')
 
 
 def filter_files_by_time(archivos_nc: list, fecha_jjj: str, horarios_list: list) -> list:
@@ -22,28 +27,23 @@ def filter_files_by_time(archivos_nc: list, fecha_jjj: str, horarios_list: list)
     Filtra archivos NetCDF por fecha juliana y rango horario.
     Compatible con archivos S3 (string) y rutas locales NetCDF.
     """
+    # Pre-compilar los rangos horarios para una búsqueda más eficiente
+    rangos_validos = []
+    for horario_str in horarios_list:
+        partes = horario_str.split('-')
+        inicio_hh = partes[0][:2]
+        fin_hh = partes[1][:2] if len(partes) > 1 else inicio_hh
+        rangos_validos.append((inicio_hh, fin_hh))
+
     archivos_filtrados = []
     for archivo in archivos_nc:
         nombre = archivo.name if hasattr(archivo, "name") else archivo
-        s_idx = nombre.find('_s')
-        e_idx = nombre.find('_e')
-        if s_idx == -1 or e_idx == -1:
-            continue
-        ts_str = nombre[s_idx+2:e_idx]  # Ej: '20211211900163'
-        if len(ts_str) < 9:
-            continue
-        anio = ts_str[:4]
-        dia_juliano = ts_str[4:7]
-        hora = ts_str[7:9]
-        if anio + dia_juliano != fecha_jjj:
-            continue
-        for horario_str in horarios_list:
-            partes = horario_str.split('-')
-            inicio_hh = partes[0][:2]
-            fin_hh = partes[1][:2] if len(partes) > 1 else inicio_hh
-            if inicio_hh <= hora <= fin_hh:
-                archivos_filtrados.append(archivo)
-                break
+        match = _FILENAME_TIMESTAMP_RE.search(nombre)
+        if match:
+            anio, dia_juliano, hora = match.groups()
+            if anio + dia_juliano == fecha_jjj:
+                if any(inicio <= hora <= fin for inicio, fin in rangos_validos):
+                    archivos_filtrados.append(archivo)
     return archivos_filtrados
 
 # --- Clase para recuperación local (Lustre) ---
@@ -142,15 +142,17 @@ class RecoverFiles:
         self.base_download_path = Path(base_download_path)
         self.logger = logging.getLogger(__name__)
         self.executor = executor
-        self.s3_fallback_enabled = (s3_fallback_enabled
-                                    if s3_fallback_enabled is not None
-                                    else os.getenv("S3_FALLBACK_ENABLED", "1") not in ("0", "false", "False"))
-        # Nuevo flag para Lustre
-        if lustre_enabled is not None:
-            self.lustre_enabled = lustre_enabled
-        else:
-            disable_lustre_env = os.getenv("DISABLE_LUSTRE", "").lower()
-            self.lustre_enabled = os.getenv("LUSTRE_ENABLED", "1") not in ("0", "false", "False") and disable_lustre_env not in ("1", "true")
+        self.s3_fallback_enabled = (
+            bool(s3_fallback_enabled)
+            if s3_fallback_enabled is not None
+            else env_bool("S3_FALLBACK_ENABLED", True)
+        )
+        # Flag unificado para Lustre
+        self.lustre_enabled = (
+            bool(lustre_enabled)
+            if lustre_enabled is not None
+            else env_bool("LUSTRE_ENABLED", True)
+        )
 
         self.FILE_PROCESSING_TIMEOUT_SECONDS = int(os.getenv("FILE_PROCESSING_TIMEOUT_SECONDS", "10"))
         self.S3_RETRY_ATTEMPTS = 3

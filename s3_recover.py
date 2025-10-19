@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime, timezone
 from pebble import ProcessPool, ThreadPool
+from concurrent.futures import as_completed
+import os
 
 
 class S3RecoverFiles:
@@ -94,6 +96,7 @@ class S3RecoverFiles:
         # Normalizar objetivos únicos
         objetivos_unicos = list(set(archivos_s3))
         total_obj = len(objetivos_unicos) or 1
+        update_every = int(os.getenv("S3_PROGRESS_STEP", "100")) or 100
 
         # Pre-contar archivos ya existentes para reflejar progreso real tras reinicio
         existentes = []
@@ -118,7 +121,6 @@ class S3RecoverFiles:
 
         # Usar el mayor entre los que coinciden con objetivos y los .nc locales, pero sin exceder total_obj
         completados = min(max(len(existentes), local_nc_count), total_obj)
-        update_every = 100  # Fijo: actualizar progreso cada 100 archivos
         ok_count = len(existentes)
         fail_count = 0
 
@@ -142,14 +144,14 @@ class S3RecoverFiles:
                 pool.schedule(self._download_single_s3_objective, args=(consulta_id, s3_path, directorio_destino, s3, db)): s3_path
                 for s3_path in pendientes
             }
-            for future in future_to_s3_path:
+            for future in as_completed(list(future_to_s3_path.keys())):
                 s3_path = future_to_s3_path[future]
                 try:
                     resultado = future.result()
                     if resultado:
                         s3_recuperados_set.add(resultado)
                         ok_count += 1
-                except Exception as e:
+                except Exception:
                     objetivos_aun_fallidos.append(Path(s3_path).name)
                     fail_count += 1
                 finally:
@@ -164,9 +166,12 @@ class S3RecoverFiles:
                             f"S3 progreso: {completados}/{total_obj}"
                         )
                         # Log resumen cada corte
-                        self.logger.info(
-                            f"S3 progreso: {completados}/{total_obj} (ok: {ok_count}, fail: {fail_count})"
-                        )
+                        try:
+                            self.logger.info(
+                                f"S3 progreso: {completados}/{total_obj} (ok: {ok_count}, fail: {fail_count})"
+                            )
+                        except Exception:
+                            pass
         # Log resumen final
         self.logger.info(
             f"S3 finalizado: {ok_count} ok, {fail_count} fallos de {total_obj} objetivos"

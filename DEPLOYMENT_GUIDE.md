@@ -139,7 +139,7 @@ Para que la aplicación se ejecute de forma persistente como un servicio del sis
     User=tu_usuario
     Group=tu_grupo
     WorkingDirectory=/opt/historic_server
-    # Carga las variables de entorno desde un archivo .env
+    # Carga las variables de entorno desde un archivo .env. La ruta es absoluta.
     EnvironmentFile=/opt/historic_server/.env
     
     ExecStart=/opt/historic_server/venv/bin/gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:9041

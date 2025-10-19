@@ -17,6 +17,7 @@ import shutil
 import secrets
 import string
 from pebble import ProcessPool
+from utils.env import env_bool
 
 # --- Configuración de Logging ---
 # Configura el logging para escribir en un archivo en un entorno de producción.
@@ -79,15 +80,15 @@ processor = HistoricQueryProcessor()
 # Instanciar el procesador de background según el modo
 if PROCESSOR_MODE == "real":
     # Pasamos el executor compartido al constructor de RecoverFiles
-    S3_FALLBACK_ENABLED = os.getenv("S3_FALLBACK_ENABLED", "true").lower() == "true"
+    S3_FALLBACK_ENABLED = env_bool("S3_FALLBACK_ENABLED", True)
 
     recover = RecoverFiles(
         db=db,
         source_data_path=SOURCE_DATA_PATH,
         base_download_path=DOWNLOAD_PATH,
         executor=executor,
-        s3_fallback_enabled=os.getenv("S3_FALLBACK_ENABLED", "1") not in ("0","false","False"),
-        lustre_enabled=os.getenv("LUSTRE_ENABLED", "1") not in ("0","false","False")
+        s3_fallback_enabled=S3_FALLBACK_ENABLED,
+        lustre_enabled=env_bool("LUSTRE_ENABLED", True)
     )
 else:
     recover = BackgroundSimulator(db)

@@ -39,11 +39,10 @@ La aplicación se configura mediante variables de entorno:
 | `HISTORIC_MAX_WORKERS`          | Número de procesos para E/S paralela                                    | `8`                |
 | `S3_FALLBACK_ENABLED`           | Habilita o deshabilita el fallback a S3 (true/false, 1/0)               | `true`            |
 | `LUSTRE_ENABLED`                | Habilita o deshabilita el uso de Lustre (true/false, 1/0)               | `true`            |
-| `DISABLE_LUSTRE`                | Alternativa para deshabilitar Lustre (true/false, 1/0)                  | `false`           |
 | `ENV_FILE`                      | Archivo .env a cargar al inicio                                          | `.env`            |
-| `FILE_PROCESSING_TIMEOUT_SECONDS` | Tiempo máximo por archivo (segundos)                                     | `120`            |
-| `SIM_LOCAL_SUCCESS_RATE`        | Tasa de éxito local en modo simulador (0.0–1.0)                          | `0.8`            |
-| `SIM_S3_SUCCESS_RATE`           | Tasa de éxito S3 en modo simulador (0.0–1.0)                             | `0.5`            |
+| `FILE_PROCESSING_TIMEOUT_SECONDS` | Tiempo máximo por archivo (segundos)                                     | `120`             |
+| `SIM_LOCAL_SUCCESS_RATE`        | Tasa de éxito local en modo simulador (0.0–1.0)                          | `0.8`             |
+| `SIM_S3_SUCCESS_RATE`           | Tasa de éxito S3 en modo simulador (0.0–1.0)                             | `0.5`             |
 
 ### Perfiles de entorno (.env)
 ```ini
@@ -298,6 +297,9 @@ pytest -m "not real_io"  # sin I/O real
     - Predeterminado: 1000.
     - Solo recorta las listas para hacer la respuesta y el guardado en DB más ligeros; los campos `total` siguen reportando el conteo real.
     - Útil cuando hay cientos de miles de archivos recuperados.
+- S3_PROGRESS_STEP (opcional): frecuencia de actualización de progreso durante descargas S3 (en número de archivos).
+    - Predeterminado: 100.
+    - Disminuir para ver actualizaciones más frecuentes en consultas grandes (p. ej., 50).
 
 Ejemplo de configuración:
 
