@@ -109,7 +109,11 @@ Verifica si una consulta es válida sin ejecutarla.
 
 Envía la solicitud para ser procesada en segundo plano. Devuelve una `consulta_id`.
 
-**Respuesta:**
+Códigos y headers:
+- 202 Accepted
+- Headers: Location: /query/{ID}
+
+**Respuesta (body):**
 ```json
 {
     "success": true,
@@ -120,6 +124,12 @@ Envía la solicitud para ser procesada en segundo plano. Devuelve una `consulta_
 ```
 
 ### 3. Monitorear el estado (`GET /query/{consulta_id}`)
+
+Códigos y headers:
+- 200 OK cuando estado = "completado"
+- 202 Accepted cuando estado en curso (incluye header Retry-After: 10)
+- 404 Not Found si no existe
+- 500 Internal Server Error si estado = "error"
 
 Consulta el estado y progreso de una solicitud en curso.
 
@@ -152,7 +162,14 @@ Consulta el estado y progreso de una solicitud en curso.
 
 Reencola una consulta existente para que vuelva a procesarse con la misma configuración original guardada. Útil tras reinicios del servidor o fallas temporales. No vuelve a traer archivos que ya existan en la carpeta destino.
 
-**Respuesta de ejemplo:**
+Códigos y headers:
+- 202 Accepted
+- Headers: Location: /query/{ID}
+- 404 si no existe
+- 400 si el estado no permite reinicio
+- Seguridad opcional: requiere header X-API-Key si se define API_KEY en el servidor
+
+**Respuesta (body):**
 ```json
 { "success": true, "message": "La consulta '<ID>' ha sido reenviada para su procesamiento." }
 ```
@@ -161,6 +178,12 @@ Requisitos: la consulta debe existir y estar en estado `procesando`, `error` o `
 ### 3.2 Eliminar una consulta (`DELETE /query/{consulta_id}`)
 
 Elimina el registro de una consulta y opcionalmente purga el directorio de trabajo asociado.
+
+Códigos y seguridad:
+- 200 OK si elimina o informa estado
+- 404 si no existe y no se indicó `purge`
+- 409 si intenta purgar una consulta en proceso sin `force=true`
+- Seguridad opcional: requiere header X-API-Key si se define API_KEY en el servidor
 
 Parámetros:
 - `purge` (bool, opcional): si es `true`, elimina el directorio `/data/tmp/<ID>` (o el definido en `HISTORIC_DOWNLOAD_PATH`).
@@ -283,16 +306,27 @@ pytest              # todas las pruebas
 pytest -m "not real_io"  # sin I/O real
 ```
 
+## Cabeceras relevantes
+- Location: devuelto por POST /query y POST /query/{ID}/restart
+- Retry-After: 10 en GET /query/{ID} cuando la consulta está en curso
+
 ## Despliegue y reanudación segura
 
 - Las descargas desde S3 son idempotentes: si un archivo ya existe localmente, se omite. Esto permite reinicios o despliegues sin perder trabajo ya descargado.
 - El progreso durante S3 se actualiza en cortes cada 100 archivos (85%→95%). Al finalizar el reporte pasa a 100%.
 - Si una consulta parece detenida tras un reinicio, puedes reencolarla:
-    - `POST /query/{consulta_id}/restart`
+    - `POST /query/{consulta_id}/restart` (opcionalmente protegido con API_KEY)
     - El proceso retomará sin volver a descargar lo ya presente en disco.
 
 ## Ajustes operativos
 
+- FILE_PROCESSING_TIMEOUT_SECONDS: tiempo máximo por archivo (segundos). Predeterminado: 120.
+- Logging con rotación: define LOG_FILE (por defecto app.log), LOG_MAX_BYTES (10MB) y LOG_BACKUP_COUNT (7).
+- S3 timeouts y reintentos:
+  - S3_CONNECT_TIMEOUT (default 5)
+  - S3_READ_TIMEOUT (default 30)
+  - S3_RETRY_ATTEMPTS (hereda valor por defecto interno)
+  - S3_RETRY_BACKOFF_SECONDS (base de backoff; se aplica jitter pequeño)
 - MAX_FILES_IN_REPORT (opcional): limita cuántos nombres de archivo se incluyen en `resultados.fuentes.*.archivos` cuando el volumen es muy grande.
     - Predeterminado: 1000.
     - Solo recorta las listas para hacer la respuesta y el guardado en DB más ligeros; los campos `total` siguen reportando el conteo real.
@@ -300,9 +334,17 @@ pytest -m "not real_io"  # sin I/O real
 - S3_PROGRESS_STEP (opcional): frecuencia de actualización de progreso durante descargas S3 (en número de archivos).
     - Predeterminado: 100.
     - Disminuir para ver actualizaciones más frecuentes en consultas grandes (p. ej., 50).
+- Seguridad API opcional:
+  - API_KEY: si se define, los endpoints de restart y delete requieren el header X-API-Key con ese valor.
 
 Ejemplo de configuración:
 
 ```bash
 export MAX_FILES_IN_REPORT=800
+export LOG_FILE=/var/log/historic_server/app.log
+export LOG_MAX_BYTES=$((20*1024*1024))
+export LOG_BACKUP_COUNT=10
+export S3_CONNECT_TIMEOUT=5
+export S3_READ_TIMEOUT=30
+export API_KEY=mi_secreto
 ```

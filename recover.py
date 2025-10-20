@@ -154,7 +154,7 @@ class RecoverFiles:
             else env_bool("LUSTRE_ENABLED", True)
         )
 
-        self.FILE_PROCESSING_TIMEOUT_SECONDS = int(os.getenv("FILE_PROCESSING_TIMEOUT_SECONDS", "10"))
+        self.FILE_PROCESSING_TIMEOUT_SECONDS = int(os.getenv("FILE_PROCESSING_TIMEOUT_SECONDS", "120"))
         self.S3_RETRY_ATTEMPTS = 3
         self.S3_RETRY_BACKOFF_SECONDS = 2
         self.GOES19_OPERATIONAL_DATE = datetime(2025, 4, 1, tzinfo=timezone.utc)

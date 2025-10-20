@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Body
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, Request
 from database import ConsultasDatabase, DATABASE_PATH
 from background_simulator import BackgroundSimulator
 from recover import RecoverFiles # Importar el procesador real
@@ -6,9 +6,11 @@ from processors import HistoricQueryProcessor
 from schemas import HistoricQueryRequest
 from datetime import datetime
 from typing import Dict, Any
+import os
 import re
 from contextlib import asynccontextmanager
 import logging
+from logging.handlers import RotatingFileHandler
 from pydantic import ValidationError
 from config import SatelliteConfigGOES
 import uvicorn
@@ -20,15 +22,23 @@ from pebble import ProcessPool
 from utils.env import env_bool
 
 # --- Configuración de Logging ---
-# Configura el logging para escribir en un archivo en un entorno de producción.
-# En un entorno real, podrías usar una configuración más avanzada (ej. JSON, rotación de archivos).
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler() # Escribe a la consola. Reemplazar con logging.FileHandler("app.log") para producción.
-    ]
-)
+# Rotación de logs para producción con salida a archivo y consola.
+LOG_FILE = os.getenv("LOG_FILE", "app.log")
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024)))  # 10MB
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "7"))
+
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+# Limpiar handlers previos (por si el módulo se recarga en tests)
+root_logger.handlers = []
+
+rotating_handler = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT)
+rotating_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+
+root_logger.addHandler(rotating_handler)
+root_logger.addHandler(console_handler)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -52,6 +62,16 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# --- Seguridad opcional con API Key ---
+API_KEY = os.getenv("API_KEY")
+
+def _require_api_key(request: Request):
+    if not API_KEY:
+        return  # No protegido si no se configura
+    provided = request.headers.get("X-API-Key")
+    if provided != API_KEY:
+        raise HTTPException(status_code=401, detail="API key inválida o ausente.")
 
 # Registro de configuraciones de satélites disponibles
 # A medida que agregues soporte para más satélites, importa su config y añádela aquí.
@@ -224,7 +244,7 @@ async def crear_solicitud(
         # Procesar en background
         background_tasks.add_task(recover.procesar_consulta, consulta_id, query_dict)
         
-        return {
+        body = {
             "success": True,
             "consulta_id": consulta_id,
             "estado": "recibido",
@@ -236,6 +256,8 @@ async def crear_solicitud(
                 "horas": query_dict['total_horas']
             }
         }
+        from fastapi.responses import JSONResponse
+        return JSONResponse(content=body, status_code=202, headers={"Location": f"/query/{consulta_id}"})
         
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -271,12 +293,14 @@ async def validar_solicitud(request_data: Dict[str, Any] = Body(...)):
         raise e
 
 @app.post("/query/{consulta_id}/restart")
-async def reiniciar_consulta(consulta_id: str, background_tasks: BackgroundTasks):
+async def reiniciar_consulta(consulta_id: str, background_tasks: BackgroundTasks, request: Request):
     """
     ✅ ENDPOINT DE RECUPERACIÓN: Reinicia una consulta que se quedó atascada.
     Busca una consulta existente y la vuelve a encolar para su procesamiento.
     Es útil si el servidor se reinició o un proceso de fondo falló.
     """
+    _require_api_key(request)
+
     consulta = db.obtener_consulta(consulta_id)
     if not consulta:
         raise HTTPException(status_code=404, detail="Consulta no encontrada.")
@@ -292,10 +316,12 @@ async def reiniciar_consulta(consulta_id: str, background_tasks: BackgroundTasks
     query_dict = consulta["query"]
     background_tasks.add_task(recover.procesar_consulta, consulta_id, query_dict)
 
-    return {
+    from fastapi.responses import JSONResponse
+    body = {
         "success": True,
         "message": f"La consulta '{consulta_id}' ha sido reenviada para su procesamiento."
     }
+    return JSONResponse(content=body, status_code=202, headers={"Location": f"/query/{consulta_id}"})
 
 @app.get("/query/{consulta_id}")
 async def obtener_consulta(
@@ -374,7 +400,18 @@ async def obtener_consulta(
         resp["total_mb"] = None
         resp["etapa"] = "error_lectura_fs"
 
-    return resp
+    # Decidir código de estado según estado de la consulta
+    from fastapi.responses import JSONResponse
+    estado = consulta["estado"]
+    if estado == "completado":
+        return JSONResponse(content=resp, status_code=200)
+    elif estado in ("procesando", "recibido"):
+        return JSONResponse(content=resp, status_code=202, headers={"Retry-After": "10"})
+    elif estado == "error":
+        return JSONResponse(content=resp, status_code=500)
+    else:
+        # Estado desconocido: devolver 200 con payload para no romper clientes
+        return JSONResponse(content=resp, status_code=200)
 
 @app.get("/queries")
 async def listar_consultas(
@@ -403,12 +440,14 @@ async def listar_consultas(
     }
 
 @app.delete("/query/{consulta_id}")
-async def eliminar_consulta(consulta_id: str, purge: bool = False, force: bool = False):
+async def eliminar_consulta(request: Request, consulta_id: str, purge: bool = False, force: bool = False):
     """
     Elimina una consulta de la base de datos. Opcionalmente purga el directorio de trabajo.
     - purge=true para eliminar / purgar el directorio de archivos asociado a la consulta.
     - force=true para permitir purge aunque la consulta esté en estado 'procesando'.
     """
+    _require_api_key(request)
+
     consulta = db.obtener_consulta(consulta_id)
 
     # Purga opcional del directorio asociado a la consulta

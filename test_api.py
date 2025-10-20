@@ -141,7 +141,7 @@ def test_query_success(monkeypatch):
     monkeypatch.setattr("main.generar_id_consulta", lambda: "TEST_SUCCESS")
 
     response = client.post("/query", json=VALID_REQUEST)
-    assert response.status_code == 200
+    assert response.status_code == 202
     data = response.json()
     assert data["success"] is True
     assert data["estado"] == "recibido"
@@ -166,7 +166,7 @@ def test_internal_date_format_is_julian(monkeypatch):
 
     # 1. Crear la consulta
     response = client.post("/query", json=request_data)
-    assert response.status_code == 200
+    assert response.status_code == 202
 
     # 2. Obtener la consulta directamente de la DB de prueba
     consulta_guardada = main.db.obtener_consulta(TEST_ID)
@@ -187,7 +187,7 @@ def test_query_and_get_status(monkeypatch):
 
     # 1. Crear la consulta y verificar la respuesta inicial
     create_response = client.post("/query", json=VALID_REQUEST)
-    assert create_response.status_code == 200
+    assert create_response.status_code == 202
     create_data = create_response.json()
     assert create_data["consulta_id"] == TEST_ID
     assert create_data["estado"] == "recibido"
@@ -196,7 +196,7 @@ def test_query_and_get_status(monkeypatch):
     # Esto hace la prueba más robusta al esperar el estado final.
     for _ in range(10): # Intentar por un máximo de 10 segundos
         get_response = client.get(f"/query/{TEST_ID}")
-        assert get_response.status_code == 200
+        assert get_response.status_code in (200, 202)
         get_data = get_response.json()
         if get_data["estado"] == "completado":
             break
@@ -257,7 +257,7 @@ def test_recovery_query_is_generated_on_failure(monkeypatch):
 
     # 1. Crear la consulta
     create_response = client.post("/query", json=simple_request)
-    assert create_response.status_code == 200
+    assert create_response.status_code == 202
 
     # 2. Esperar a que se complete
     for _ in range(10):
@@ -289,7 +289,7 @@ def test_simulator_report_has_correct_sources_structure(monkeypatch):
 
     # 1. Crear la consulta usando una solicitud válida
     create_response = client.post("/query", json=VALID_REQUEST)
-    assert create_response.status_code == 200
+    assert create_response.status_code == 202
 
     # 2. Esperar a que el simulador complete el trabajo
     for _ in range(10):
@@ -355,7 +355,7 @@ def test_s3_fallback_integration(real_io_fixture, monkeypatch):
     }
 
     create_response = client.post("/query", json=s3_request)
-    assert create_response.status_code == 200
+    assert create_response.status_code == 202
 
     timeout = 60  # segundos
     for _ in range(timeout):
@@ -391,7 +391,7 @@ def test_s3_fallback_integration_l2_multi_product(real_io_fixture, monkeypatch):
     }
 
     create_response = client.post("/query", json=s3_request)
-    assert create_response.status_code == 200
+    assert create_response.status_code == 202
 
     timeout = 60
     for _ in range(timeout):
@@ -444,7 +444,7 @@ def test_complex_query_does_not_get_stuck(monkeypatch):
 
     # 1. Crear la consulta
     create_response = client.post("/query", json=complex_request)
-    assert create_response.status_code == 200
+    assert create_response.status_code == 202
 
     # 2. Monitorear hasta que se complete, con un timeout generoso
     # Si el proceso se atora, este bucle fallará por timeout.
@@ -452,7 +452,7 @@ def test_complex_query_does_not_get_stuck(monkeypatch):
     start_time = time.time()
     while time.time() - start_time < timeout:
         get_response = client.get(f"/query/{TEST_ID}")
-        assert get_response.status_code == 200
+        assert get_response.status_code in (200, 202)
         get_data = get_response.json()
         if get_data["estado"] == "completado":
             break
@@ -478,7 +478,7 @@ def test_simulator_l2_cmip_respects_requested_band(monkeypatch):
     }
 
     create_response = client.post("/query", json=req)
-    assert create_response.status_code == 200
+    assert create_response.status_code == 202
 
     for _ in range(15):
         get_resp = client.get(f"/query/{TEST_ID}")
@@ -514,7 +514,7 @@ def test_l2_cmip_without_bandas_expands_to_all(monkeypatch):
     }
 
     resp = client.post("/query", json=req)
-    assert resp.status_code == 200
+    assert resp.status_code == 202
 
     for _ in range(15):
         st = client.get(f"/query/{TEST_ID}").json()

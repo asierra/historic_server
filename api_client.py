@@ -85,15 +85,28 @@ def iniciar_nueva_consulta(session: requests.Session, base_url: str, json_file_p
     query_url = f"{base_url}/query"
     response = session.post(query_url, json=request_data)
     print_response(response)
-    if response.status_code != 200:
-        print("\n❌ La creación de la consulta falló. Abortando.")
+    if response.status_code not in (200, 202):
+        print("\n❌ La creación de la consulta no fue aceptada por el servidor. Abortando.")
         return None
-    
-    consulta_id = response.json().get("consulta_id")
+
+    # ID preferido desde el cuerpo; fallback a Location header
+    consulta_id = None
+    try:
+        consulta_id = (response.json() or {}).get("consulta_id")
+    except Exception:
+        consulta_id = None
     if not consulta_id:
-        print("\n❌ No se recibió un ID de consulta. Abortando.")
+        loc = response.headers.get("Location")
+        if loc and "/" in loc:
+            consulta_id = loc.rstrip("/").split("/")[-1]
+    if not consulta_id:
+        print("\n❌ No se recibió un ID de consulta (ni en JSON ni en Location). Abortando.")
         return None
     
+    # Mostrar Location si viene
+    if response.headers.get("Location"):
+        print(f"-> Location: {response.headers['Location']}")
+
     return consulta_id
 
 def monitorear_consulta(session: requests.Session, base_url: str, consulta_id: str, timeout: int, poll_interval: int):
@@ -107,7 +120,7 @@ def monitorear_consulta(session: requests.Session, base_url: str, consulta_id: s
 
     while time.time() - start_time < timeout:
         response = session.get(query_status_url)
-        if response.status_code == 200:
+        if response.status_code in (200, 202):
             data = response.json()
             estado = data.get("estado")
             progreso = data.get("progreso")
@@ -116,6 +129,14 @@ def monitorear_consulta(session: requests.Session, base_url: str, consulta_id: s
             if estado in ["completado", "error"]:
                 final_status = estado
                 break
+            # Si el servidor sugiere Retry-After, respetarlo; si no, usar poll_interval
+            retry_after = response.headers.get("Retry-After")
+            try:
+                wait_s = int(retry_after) if retry_after else poll_interval
+            except ValueError:
+                wait_s = poll_interval
+            time.sleep(wait_s)
+            continue
         else:
             print(f"-> Error al obtener estado: {response.status_code}")
         time.sleep(poll_interval)

@@ -66,7 +66,7 @@ def test_lustre_returns_tgz_s3_returns_nc_for_all_cases(monkeypatch):
         "fechas": {"20240510": ["12:00-12:10"]}
     }
     r = client.post("/query", json=req_l1b)
-    assert r.status_code == 200
+    assert r.status_code == 202
     assert _wait_until_completed("TEST_LUSTRE_L1B_ALL")
     resultados = client.get("/query/TEST_LUSTRE_L1B_ALL?resultados=true").json()["resultados"]
     lustre_files = resultados["fuentes"]["lustre"]["archivos"]
@@ -84,7 +84,7 @@ def test_lustre_returns_tgz_s3_returns_nc_for_all_cases(monkeypatch):
         "fechas": {"20240510": ["12:00"]}
     }
     r = client.post("/query", json=req_l2)
-    assert r.status_code == 200
+    assert r.status_code == 202
     assert _wait_until_completed("TEST_LUSTRE_L2_ALL_ALL")
     resultados = client.get("/query/TEST_LUSTRE_L2_ALL_ALL?resultados=true").json()["resultados"]
     lustre_files = resultados["fuentes"]["lustre"]["archivos"]
@@ -100,7 +100,7 @@ def test_lustre_returns_tgz_s3_returns_nc_for_all_cases(monkeypatch):
     # 2A) L1b + bandas ALL (FD) -> S3 debe devolver .nc
     monkeypatch.setattr("main.generar_id_consulta", lambda: "TEST_S3_L1B_ALL")
     r = client.post("/query", json=req_l1b)
-    assert r.status_code == 200
+    assert r.status_code == 202
     assert _wait_until_completed("TEST_S3_L1B_ALL")
     resultados = client.get("/query/TEST_S3_L1B_ALL?resultados=true").json()["resultados"]
     lustre_files = resultados["fuentes"]["lustre"]["archivos"]
@@ -111,7 +111,7 @@ def test_lustre_returns_tgz_s3_returns_nc_for_all_cases(monkeypatch):
     # 2B) L2 + productos ALL + bandas ALL (FD) -> S3 debe devolver .nc
     monkeypatch.setattr("main.generar_id_consulta", lambda: "TEST_S3_L2_ALL_ALL")
     r = client.post("/query", json=req_l2)
-    assert r.status_code == 200
+    assert r.status_code == 202
     assert _wait_until_completed("TEST_S3_L2_ALL_ALL")
     resultados = client.get("/query/TEST_S3_L2_ALL_ALL?resultados=true").json()["resultados"]
     lustre_files = resultados["fuentes"]["lustre"]["archivos"]

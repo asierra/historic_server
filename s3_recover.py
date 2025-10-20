@@ -1,4 +1,5 @@
 import s3fs
+import random
 import time
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -12,8 +13,11 @@ class S3RecoverFiles:
     def __init__(self, logger, max_workers, retry_attempts, retry_backoff):
         self.logger = logger
         self.max_workers = max_workers
-        self.retry_attempts = retry_attempts
-        self.retry_backoff = retry_backoff
+        # Guardar defaults para no contaminar con jitter entre invocaciones
+        self.default_retry_attempts = int(retry_attempts)
+        self.default_retry_backoff = float(retry_backoff)
+        self.retry_attempts = int(retry_attempts)
+        self.retry_backoff = float(retry_backoff)
 
     def get_sat_code_for_date(self, satellite_name: str, request_date: datetime, goes19_operational_date: datetime) -> str:
         if request_date.tzinfo is None:
@@ -46,7 +50,15 @@ class S3RecoverFiles:
         sat_code = self.get_sat_code_for_date(sat_name, request_date, goes19_operational_date)
         s3_bucket = f"noaa-goes{sat_code.replace('G', '')}"
         s3_product_names = self.get_s3_product_names(query_dict)
-        s3 = s3fs.S3FileSystem(anon=True, config_kwargs={'connect_timeout': 10, 'read_timeout': 30})  # <-- AGREGA ESTA LÍNEA
+        # Timeouts y reintentos para robustez en producción
+        connect_timeout = int(os.getenv("S3_CONNECT_TIMEOUT", "5"))
+        read_timeout = int(os.getenv("S3_READ_TIMEOUT", "30"))
+        # Leer ajustes de reintento desde env con defaults inmutables del constructor
+        self.retry_attempts = int(os.getenv("S3_RETRY_ATTEMPTS", str(self.default_retry_attempts)))
+        base_backoff = float(os.getenv("S3_RETRY_BACKOFF_SECONDS", str(self.default_retry_backoff)))
+        jitter = random.uniform(0, 0.5)
+        self.retry_backoff = max(1.0, base_backoff) + jitter
+        s3 = s3fs.S3FileSystem(anon=True, config_kwargs={'connect_timeout': connect_timeout, 'read_timeout': read_timeout})
         objetivos_s3_a_descargar = set()
         bandas_solicitadas = query_dict.get('bandas')
         # ...resto del método...
@@ -69,7 +81,28 @@ class S3RecoverFiles:
                     for s3_product_name in s3_product_names:
                         s3_path_hora = f"{s3_bucket}/{s3_product_name}/{anio}/{dia_juliano}/{hora:02d}/"
                         try:
-                            archivos_en_hora = s3.ls(s3_path_hora)
+                            archivos_en_hora = None
+                            last_exc = None
+                            for attempt in range(self.retry_attempts):
+                                try:
+                                    archivos_en_hora = s3.ls(s3_path_hora)
+                                    break
+                                except FileNotFoundError:
+                                    archivos_en_hora = []
+                                    break
+                                except Exception as e:
+                                    last_exc = e
+                                    wait = self.retry_backoff * (2 ** attempt)
+                                    time.sleep(wait)
+                            if archivos_en_hora is None:
+                                # Si después de reintentos sigue fallando, omitir esta hora
+                                if last_exc:
+                                    try:
+                                        self.logger.debug(f"LS S3 falló {self.retry_attempts} veces en {s3_path_hora}: {last_exc}")
+                                    except Exception:
+                                        pass
+                                continue
+
                             archivos_nc = [f for f in archivos_en_hora if f.endswith('.nc')]
                             bandas_solicitadas = query_dict.get('bandas')
                             if bandas_solicitadas:
@@ -89,7 +122,9 @@ class S3RecoverFiles:
 
 
     def download_files(self, consulta_id: str, archivos_s3: List[str], directorio_destino: Path, db) -> (List[Path], List[str]):
-        s3 = s3fs.S3FileSystem(anon=True, config_kwargs={'connect_timeout': 10, 'read_timeout': 30})
+        connect_timeout = int(os.getenv("S3_CONNECT_TIMEOUT", "5"))
+        read_timeout = int(os.getenv("S3_READ_TIMEOUT", "30"))
+        s3 = s3fs.S3FileSystem(anon=True, config_kwargs={'connect_timeout': connect_timeout, 'read_timeout': read_timeout})
         objetivos_aun_fallidos = []
         s3_recuperados_set = set()
 
@@ -136,7 +171,7 @@ class S3RecoverFiles:
 
         # Si no hay pendientes, retornar de inmediato
         if not pendientes:
-            self.logger.info(f"S3: no hay descargas pendientes; {completados}/{total_obj} ya presentes")
+            self.logger.info(f"S3: no hay descargas pendientes; {completados}/{total_obj} ya presentes (consulta_id={consulta_id})")
             return list(s3_recuperados_set), objetivos_aun_fallidos
 
         with ThreadPool(max_workers=self.max_workers) as pool:
@@ -168,13 +203,13 @@ class S3RecoverFiles:
                         # Log resumen cada corte
                         try:
                             self.logger.info(
-                                f"S3 progreso: {completados}/{total_obj} (ok: {ok_count}, fail: {fail_count})"
+                                f"S3 progreso: {completados}/{total_obj} (ok: {ok_count}, fail: {fail_count}) (consulta_id={consulta_id})"
                             )
                         except Exception:
                             pass
         # Log resumen final
         self.logger.info(
-            f"S3 finalizado: {ok_count} ok, {fail_count} fallos de {total_obj} objetivos"
+            f"S3 finalizado: {ok_count} ok, {fail_count} fallos de {total_obj} objetivos (consulta_id={consulta_id})"
         )
         return list(s3_recuperados_set), objetivos_aun_fallidos
 
@@ -196,11 +231,11 @@ class S3RecoverFiles:
             except Exception as e:
                 last_exception = e
                 # Reducir ruido: registrar intentos a nivel debug
-                self.logger.debug(f"Intento {attempt + 1}/{self.retry_attempts} falló para {archivo_remoto_s3}: {e}")
+                self.logger.debug(f"Intento {attempt + 1}/{self.retry_attempts} falló para {archivo_remoto_s3} (consulta_id={consulta_id}): {e}")
                 if attempt < self.retry_attempts - 1:
                     wait_time = self.retry_backoff * (2 ** attempt)
                     time.sleep(wait_time)
-        self.logger.error(f"❌ Fallaron todos los {self.retry_attempts} intentos para descargar desde S3 el archivo {archivo_remoto_s3}.")
+        self.logger.error(f"❌ Fallaron todos los {self.retry_attempts} intentos para descargar desde S3 el archivo {archivo_remoto_s3} (consulta_id={consulta_id}).")
         if last_exception:
             raise last_exception
         return None
