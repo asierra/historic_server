@@ -1,6 +1,8 @@
 import time
 import types
 import pytest
+import os
+import shutil
 from fastapi.testclient import TestClient
 
 # ------------- Fakes aislados para DB y Recover -------------
@@ -58,6 +60,9 @@ class FakeDB:
 class FakeRecover:
     def __init__(self, db):
         self.db = db
+        # Añadir atributos para compatibilidad con el endpoint /health
+        self.lustre_enabled = True
+        self.s3_fallback_enabled = True
 
     def procesar_consulta(self, consulta_id, query_dict):
         # No hace nada pesado, solo marca 'procesando' para simular aceptada
@@ -67,6 +72,7 @@ class FakeRecover:
 @pytest.fixture
 def client(monkeypatch):
     # Import main del Query Processor
+    TEST_DOWNLOAD_PATH = "./test_downloads_status"
     import main
 
     # Reemplazar DB global y recover por fakes
@@ -74,12 +80,20 @@ def client(monkeypatch):
     monkeypatch.setattr(main, "db", fake_db, raising=True)
     monkeypatch.setenv("PROCESSOR_MODE", "real")  # por si el módulo lo usa
 
+    # Crear directorio de descarga para las pruebas y configurar la variable de entorno
+    os.makedirs(TEST_DOWNLOAD_PATH, exist_ok=True)
+    monkeypatch.setattr(main, "DOWNLOAD_PATH", TEST_DOWNLOAD_PATH)
+
     fake_recover = FakeRecover(fake_db)
     monkeypatch.setattr(main, "recover", fake_recover, raising=True)
 
     # Crear cliente
-    with TestClient(main.app) as c:
-        yield c, fake_db
+    try:
+        with TestClient(main.app) as c:
+            yield c, fake_db
+    finally:
+        if os.path.exists(TEST_DOWNLOAD_PATH):
+            shutil.rmtree(TEST_DOWNLOAD_PATH)
 
 
 # ------------- Tests de códigos y headers -------------

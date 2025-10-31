@@ -43,6 +43,9 @@ La aplicación se configura mediante variables de entorno:
 | `FILE_PROCESSING_TIMEOUT_SECONDS` | Tiempo máximo por archivo (segundos)                                     | `120`             |
 | `SIM_LOCAL_SUCCESS_RATE`        | Tasa de éxito local en modo simulador (0.0–1.0)                          | `0.8`             |
 | `SIM_S3_SUCCESS_RATE`           | Tasa de éxito S3 en modo simulador (0.0–1.0)                             | `0.5`             |
+| `MAX_FILES_PER_QUERY`           | Límite de archivos estimados por consulta (0 = sin límite)               | `0`               |
+| `MAX_SIZE_MB_PER_QUERY`         | Límite de tamaño estimado en MB por consulta (0 = sin límite)            | `0`               |
+| `MIN_FREE_SPACE_GB_BUFFER`      | Búfer de seguridad en GB que debe quedar libre en disco                  | `10`              |
 
 ### Perfiles de entorno (.env)
 ```ini
@@ -166,8 +169,7 @@ Códigos y headers:
 - 202 Accepted
 - Headers: Location: /query/{ID}
 - 404 si no existe
-- 400 si el estado no permite reinicio
-- Seguridad opcional: requiere header X-API-Key si se define API_KEY en el servidor
+- 400 si el estado no permite reinicio (ej. 'recibido')
 
 **Respuesta (body):**
 ```json
@@ -182,8 +184,7 @@ Elimina el registro de una consulta y opcionalmente purga el directorio de traba
 Códigos y seguridad:
 - 200 OK si elimina o informa estado
 - 404 si no existe y no se indicó `purge`
-- 409 si intenta purgar una consulta en proceso sin `force=true`
-- Seguridad opcional: requiere header X-API-Key si se define API_KEY en el servidor
+- 409 si se intenta purgar una consulta en proceso sin `force=true`
 
 Parámetros:
 - `purge` (bool, opcional): si es `true`, elimina el directorio `/data/tmp/<ID>` (o el definido en `HISTORIC_DOWNLOAD_PATH`).
@@ -206,29 +207,8 @@ Respuestas típicas:
 { "success": true, "message": "Registro de consulta eliminado. Directorio purgado." }
 { "success": true, "message": "Registro de consulta no encontrado. Directorio purgado." }
 ```
-- Si no existe el registro y no se indicó `purge`, devuelve 404.
 
-Comando útil para ver detalles en vivo (opcional):
-
-```bash
-# Reemplaza $ID por tu consulta_id
-curl -s "http://127.0.0.1:9041/query/$ID?detalles=true" | jq
-```
-
-Ejemplo de campo `detalles`:
-
-```json
-{
-    "detalles": {
-        "archivos_en_directorio": 23542,
-        "tamaño_descargado_mb": 8123.77,
-        "etapa": "recuperando-local",
-        "s3_pendientes": 229913
-    }
-}
-```
-
-### 4. Obtener resultados (`GET /query/{consulta_id}?resultados=True`)
+### 6. Obtener Resultados (`GET /query/{consulta_id}?resultados=True`)
 
 Una vez que el estado es `completado`, usa este endpoint para obtener el reporte final.
 
@@ -237,7 +217,6 @@ Una vez que el estado es `completado`, usa este endpoint para obtener el reporte
 {
     "consulta_id": "aBcDeF12",
     "estado": "completado",
-    "mensaje": "Recuperación: T=112, L=110, S=2",
     "resultados": {
         "fuentes": {
             "lustre": { "archivos": [...], "total": 110 },

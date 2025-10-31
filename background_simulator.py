@@ -19,6 +19,9 @@ class BackgroundSimulator():
         # Hacer las probabilidades de éxito configurables
         self.local_success_rate = float(os.getenv("SIM_LOCAL_SUCCESS_RATE", "0.8"))
         self.s3_success_rate = float(os.getenv("SIM_S3_SUCCESS_RATE", "0.5"))
+        # Añadir atributos para compatibilidad con el endpoint /health
+        self.lustre_enabled = True
+        self.s3_fallback_enabled = True
         logging.info(f"📈 Simulador inicializado con tasa de éxito local: {self.local_success_rate*100}% y S3: {self.s3_success_rate*100}%")
 
         self.etapas_simuladas = {
@@ -220,12 +223,6 @@ class BackgroundSimulator():
         # (Esta lógica es simplificada, solo para el nombre del archivo)
         # Determinar si se debe devolver el .tgz o expandir a .nc
         # IMPORTANTE: Usar las bandas ORIGINALES para determinar si se debe copiar el .tgz completo
-        
-        # Normalizar bandas_originales y productos_originales para manejar tanto strings como listas
-        if isinstance(bandas_originales, str):
-            bandas_originales = [bandas_originales]
-        if isinstance(productos_originales, str):
-            productos_originales = [productos_originales]
         
         tiene_all_bandas = 'ALL' in [str(b).upper() for b in (bandas_originales or [])]
         tiene_all_productos = 'ALL' in [str(p).upper() for p in (productos_originales or [])]

@@ -1,24 +1,34 @@
 import os
 import time
 import pytest
+import shutil
 from fastapi.testclient import TestClient
 import main
 from background_simulator import BackgroundSimulator
 from database import ConsultasDatabase
 
 TEST_DB_PATH = "test_consultas_sources.db"
+TEST_DOWNLOAD_PATH = "./test_downloads_sources"
 
 @pytest.fixture(autouse=True)
 def override_db_for_tests(monkeypatch):
     """Parchea la DB y el recover con el simulador para estas pruebas."""
     test_db = ConsultasDatabase(db_path=TEST_DB_PATH)
     monkeypatch.setattr(main, "db", test_db)
+
+    # Crear directorio de descarga para las pruebas y configurar la variable de entorno
+    os.makedirs(TEST_DOWNLOAD_PATH, exist_ok=True)
+    monkeypatch.setattr(main, "DOWNLOAD_PATH", TEST_DOWNLOAD_PATH)
+
     monkeypatch.setattr(main, "recover", BackgroundSimulator(test_db))
+
     try:
         yield
     finally:
         if os.path.exists(TEST_DB_PATH):
             os.remove(TEST_DB_PATH)
+        if os.path.exists(TEST_DOWNLOAD_PATH):
+            shutil.rmtree(TEST_DOWNLOAD_PATH)
 
 client = TestClient(main.app)
 
@@ -62,7 +72,7 @@ def test_lustre_returns_tgz_s3_returns_nc_for_all_cases(monkeypatch):
     req_l1b = {
         "nivel": "L1b",
         "dominio": "fd",
-        "bandas": "ALL",
+        "bandas": ["ALL"],
         "fechas": {"20240510": ["12:00-12:10"]}
     }
     r = client.post("/query", json=req_l1b)
@@ -78,8 +88,8 @@ def test_lustre_returns_tgz_s3_returns_nc_for_all_cases(monkeypatch):
     monkeypatch.setattr("main.generar_id_consulta", lambda: "TEST_LUSTRE_L2_ALL_ALL")
     req_l2 = {
         "nivel": "L2",
-        "productos": "ALL",
-        "bandas": "ALL",
+        "productos": ["ALL"],
+        "bandas": ["ALL"],
         "dominio": "fd",
         "fechas": {"20240510": ["12:00"]}
     }

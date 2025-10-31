@@ -220,24 +220,13 @@ class SatelliteConfigGOES(SatelliteConfigBase):
         # Obtener items a procesar (productos para L2, bandas para L1b)
         items_to_process = []
         if nivel == "L1b":
-            bandas = request_data.get("bandas", [])
-            bandas_upper = [str(b).upper() for b in bandas] if bandas else []
-            if "ALL" in bandas_upper:
-                items_to_process = self.VALID_BANDAS
-            else:
-                items_to_process = bandas if bandas else ["02"]
+            # Para L1b, la estimación se basa en el número de bandas solicitadas.
+            # Si se pide 'ALL', se usan todas las bandas válidas.
+            items_to_process = self.expand_bandas(request_data.get("bandas", []))
         elif nivel == "L2":
-            # Asegurarse de que productos sea una lista, incluso si es None en el request
-            productos = request_data.get("productos") or []
-            if "CMIP" in productos:
-                bandas = request_data.get("bandas", [])
-                bandas_upper = [str(b).upper() for b in bandas] if bandas else []
-                if "ALL" in bandas_upper or not bandas:
-                    items_to_process.extend([f"CMIP_C{i:02d}" for i in range(1, 17)])
-                else:
-                    items_to_process.extend([f"CMIP_{banda}" for banda in bandas])
-                productos = [p for p in productos if p != "CMIP"]
-            items_to_process.extend(productos)
+            # Para L2, la estimación se basa en los productos solicitados.
+            # La expansión de CMIP por bandas ocurre en la generación de archivos, no aquí.
+            items_to_process = request_data.get("productos") or []
 
         for item in items_to_process:
             files_per_item[item] = 0
@@ -266,7 +255,7 @@ class SatelliteConfigGOES(SatelliteConfigBase):
                     minute_range = (end_minute - start_minute + 1) if end_minute >= start_minute else (1440 - start_minute) + end_minute + 1
 
                     for item in items_to_process:
-                        lookup_item = "CMIP" if item.startswith("CMIP_") else item
+                        lookup_item = item
                         periodicity = self.get_periodicity(nivel, dominio, lookup_item)
                         
                         files_in_range = 0
@@ -314,7 +303,7 @@ class SatelliteConfigGOES(SatelliteConfigBase):
 
         files_per_item = self._calculate_files_per_item(request_data)
         for item, count in files_per_item.items():
-            lookup_item = "CMIP" if item.startswith("CMIP_") else item
+            lookup_item = item
             file_weight = self.get_file_weight(nivel, dominio, lookup_item)
             total_size_mb += count * file_weight
 

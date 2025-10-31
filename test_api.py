@@ -1,6 +1,8 @@
 import pytest
 from fastapi.testclient import TestClient
 import main  # Importamos el módulo principal
+from collections import namedtuple
+import shutil
 import time
 import re
 from background_simulator import BackgroundSimulator
@@ -11,6 +13,7 @@ from recover import RecoverFiles  # Importar el procesador real para la prueba d
 # --- Configuración de la Base de Datos de Prueba ---
 
 TEST_DB_PATH = "test_consultas.db"
+TEST_DOWNLOAD_PATH = "./test_downloads"
 
 @pytest.fixture(autouse=True)
 def override_db_for_tests(monkeypatch):
@@ -24,6 +27,11 @@ def override_db_for_tests(monkeypatch):
     # Establecer variables de entorno para el simulador para evitar errores de inicialización
     monkeypatch.setenv("SIM_LOCAL_SUCCESS_RATE", "0.9")
     monkeypatch.setenv("SIM_S3_SUCCESS_RATE", "0.8")
+
+    # Crear directorio de descarga para las pruebas y configurar la variable de entorno
+    os.makedirs(TEST_DOWNLOAD_PATH, exist_ok=True)
+    monkeypatch.setattr(main, "DOWNLOAD_PATH", TEST_DOWNLOAD_PATH)
+
     
     # 2. Reemplazar los objetos globales en main.py
     monkeypatch.setattr(main, "db", test_db)
@@ -36,6 +44,8 @@ def override_db_for_tests(monkeypatch):
         # 3. Limpiar la base de datos después de la prueba
         if os.path.exists(TEST_DB_PATH):
             os.remove(TEST_DB_PATH)
+        if os.path.exists(TEST_DOWNLOAD_PATH):
+            shutil.rmtree(TEST_DOWNLOAD_PATH)
 
 # El cliente de prueba ahora usará la app con los objetos ya parcheados
 client = TestClient(main.app)
@@ -133,6 +143,65 @@ def test_validate_future_date_is_invalid():
     response = client.post("/validate", json=future_date_request)
     assert response.status_code == 400
     assert "está en el futuro y no es válida" in response.json()["detail"]
+
+def test_validate_rejects_string_all_for_bandas():
+    """Prueba que una solicitud con 'bandas': 'ALL' (string) es rechazada."""
+    request_with_string_all = {
+        "sat": "GOES-16",
+        "nivel": "L1b",
+        "dominio": "fd",
+        "bandas": "ALL", # Formato incorrecto
+        "fechas": { "20231026": ["12:00"] }
+    }
+    response = client.post("/validate", json=request_with_string_all)
+    assert response.status_code == 422 # Unprocessable Entity
+    assert "Input should be a valid list" in response.text
+
+def test_validate_accepts_list_all_for_bandas():
+    """Prueba que una solicitud con 'bandas': ['ALL'] (lista) es aceptada."""
+    request_with_list_all = {
+        "sat": "GOES-16",
+        "nivel": "L1b",
+        "dominio": "fd",
+        "bandas": ["ALL"], # Formato correcto
+        "fechas": { "20231026": ["12:00"] }
+    }
+    response = client.post("/validate", json=request_with_list_all)
+    assert response.status_code == 200
+
+# --- Pruebas para límites de consulta y disco ---
+
+def test_validate_passes_when_limits_are_zero(monkeypatch):
+    """Prueba que una consulta grande pasa si los límites son 0 (ilimitados)."""
+    monkeypatch.setattr(main, "MAX_FILES_PER_QUERY", 0)
+    monkeypatch.setattr(main, "MAX_SIZE_MB_PER_QUERY", 0)
+
+    # Simular que hay suficiente espacio en disco
+    free_space_bytes = 50 * 1024 * 1024 * 1024 # 50 GB
+    disk_usage_result = namedtuple('disk_usage_result', ['total', 'used', 'free'])
+    mock_disk_usage = disk_usage_result(total=100, used=50, free=free_space_bytes)
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: mock_disk_usage)
+
+    response = client.post("/validate", json=VALID_REQUEST)
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
+def test_validate_passes_when_within_limits(monkeypatch):
+    """Prueba que una consulta pasa si está dentro de todos los límites."""
+    monkeypatch.setattr(main, "MAX_FILES_PER_QUERY", 100) # Consulta estima 40
+    monkeypatch.setattr(main, "MAX_SIZE_MB_PER_QUERY", 2000) # Consulta estima ~1580
+    monkeypatch.setattr(main, "MIN_FREE_SPACE_GB_BUFFER", 5)
+
+    # Simular que hay suficiente espacio en disco
+    free_space_bytes = 50 * 1024 * 1024 * 1024 # 50 GB
+    disk_usage_result = namedtuple('disk_usage_result', ['total', 'used', 'free'])
+    mock_disk_usage = disk_usage_result(total=100, used=50, free=free_space_bytes)
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: mock_disk_usage)
+
+    response = client.post("/validate", json=VALID_REQUEST)
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
 # --- Pruebas para el endpoint /query ---
 
 def test_query_success(monkeypatch):
@@ -441,6 +510,12 @@ def test_complex_query_does_not_get_stuck(monkeypatch):
         },
         "creado_por": "test@lanot.unam.mx"
     }
+
+    # Simular que hay suficiente espacio en disco para esta consulta grande
+    free_space_bytes = 500 * 1024 * 1024 * 1024 # 500 GB
+    disk_usage_result = namedtuple('disk_usage_result', ['total', 'used', 'free'])
+    mock_disk_usage = disk_usage_result(total=1000, used=500, free=free_space_bytes)
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: mock_disk_usage)
 
     # 1. Crear la consulta
     create_response = client.post("/query", json=complex_request)

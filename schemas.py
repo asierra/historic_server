@@ -1,47 +1,20 @@
-from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Dict, Any, Union
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 class HistoricQueryRequest(BaseModel):
     """
-    A generic Pydantic model for historic queries.
-    It defines the structure of the request. The specific validation logic
-    (e.g., valid satellites, bands) is handled dynamically in the endpoint
-    using a configuration class.
+    Modelo Pydantic para las solicitudes de consultas históricas.
+    Define la estructura y los tipos de datos esperados en el JSON de entrada.
     """
-    sat: Optional[str] = Field(None, description="Satélite a consultar.")
-    sensor: Optional[str] = Field(None, description="Sensor del satélite (ej. abi, suvi, glm).")
-    nivel: Optional[str] = Field(None, description="Nivel de procesamiento.")
-    dominio: str = Field(..., description="Dominio geográfico (ej. fd, conus).")
-    productos: Optional[Union[List[str], str]] = Field(None, description="Lista de productos derivados. Use 'ALL' para todos.")
-    bandas: Optional[Union[List[str], str]] = Field(None, description="Bandas espectrales. Use 'ALL' para todas.")
-    fechas: Dict[str, List[str]] = Field(..., description="Fechas con horarios para la consulta.")
-
-    @field_validator('bandas', mode='before')
-    def allow_string_for_all_bands(cls, v):
-        """Permite que 'bandas' sea la cadena "ALL" y la convierte en ["ALL"]."""
-        if isinstance(v, str):
-            if v.upper() == 'ALL':
-                return ['ALL']
-            raise TypeError(f"bandas debe ser una lista de strings o 'ALL', no '{v}'")
-        if isinstance(v, list):
-            return v
-        if v is None:
-            return None
-        raise TypeError(f"bandas debe ser una lista de strings o 'ALL', no '{v}'")
-
-    @field_validator('productos', mode='before')
-    def allow_string_for_all_productos(cls, v):
-        """Permite que 'productos' sea la cadena "ALL" y la convierte en ["ALL"]."""
-        if isinstance(v, str):
-            if v.upper() == 'ALL':
-                return ['ALL']
-            raise TypeError(f"productos debe ser una lista de strings o 'ALL', no '{v}'")
-        if isinstance(v, list):
-            return v
-        if v is None:
-            return None
-        raise TypeError(f"productos debe ser una lista de strings o 'ALL', no '{v}'")
+    sat: Optional[str] = Field(None, description="Satélite a consultar, p.ej., 'GOES-16'. Si es nulo, se usa el default de la configuración.")
+    sensor: Optional[str] = Field(None, description="Sensor a consultar, p.ej., 'abi'.")
+    nivel: Optional[str] = Field(None, description="Nivel de procesamiento, p.ej., 'L1b' o 'L2'.")
+    bandas: Optional[List[str]] = Field(None, description="Lista de bandas a recuperar, p.ej., ['02', '13'] o ['ALL'].")
+    productos: Optional[List[str]] = Field(None, description="Lista de productos L2 a recuperar, p.ej., ['ACHA', 'CMIP'] o ['ALL'].")
+    dominio: str = Field(..., description="Dominio geográfico, p.ej., 'fd', 'conus'.")
+    fechas: Dict[str, List[str]] = Field(..., description="Diccionario de fechas y rangos horarios.")
+    creado_por: Optional[str] = Field(None, description="Email o identificador del usuario que crea la solicitud.")
 
 
 class HistoricQueryResponse(BaseModel):

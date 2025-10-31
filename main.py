@@ -86,6 +86,11 @@ DB_PATH = os.getenv("HISTORIC_DB_PATH", DATABASE_PATH)
 SOURCE_DATA_PATH = os.getenv("HISTORIC_SOURCE_PATH", "/depot/goes16")
 DOWNLOAD_PATH = os.getenv("HISTORIC_DOWNLOAD_PATH", "/data/tmp")
 
+# --- Límites de consulta y disco ---
+MAX_FILES_PER_QUERY = int(os.getenv("MAX_FILES_PER_QUERY", "0")) # 0 = sin límite
+MAX_SIZE_MB_PER_QUERY = int(os.getenv("MAX_SIZE_MB_PER_QUERY", "0")) # 0 = sin límite
+MIN_FREE_SPACE_GB_BUFFER = int(os.getenv("MIN_FREE_SPACE_GB_BUFFER", "10")) # Búfer de seguridad en GB
+
 # Selección del procesador de background mediante variable de entorno
 PROCESSOR_MODE = os.getenv("PROCESSOR_MODE", "real") # 'real' o 'simulador'
 
@@ -184,6 +189,17 @@ def _validate_and_prepare_request(request_data: Dict[str, Any]) -> (Dict[str, An
     if not config:
         raise HTTPException(status_code=400, detail=f"Satélite '{sat_name}' no es soportado o es inválido.")
 
+    # 2.1. Validar fecha futura ANTES de procesar
+    today = datetime.now().date()
+    for fecha_str in request_data.get('fechas', {}).keys():
+        fecha_a_validar_str = fecha_str.split('-')[-1]
+        try:
+            fecha_a_validar = datetime.strptime(fecha_a_validar_str, "%Y%m%d").date()
+            if fecha_a_validar > today:
+                raise HTTPException(status_code=400, detail=f"La fecha '{fecha_a_validar.strftime('%Y-%m-%d')}' está en el futuro y no es válida.")
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Formato de fecha inválido en la clave: '{fecha_str}'. Se esperaba 'YYYYMMDD' o 'YYYYMMDD-YYYYMMDD'.")
+
     # 3. Defaults
     data = request.model_dump()
     data['sat'] = sat_name
@@ -206,18 +222,55 @@ def _validate_and_prepare_request(request_data: Dict[str, Any]) -> (Dict[str, An
         # L2 sin productos CMI ni ALL: no exigir bandas
         data['bandas'] = []
 
-    if not config.is_valid_satellite(data['sat']):
-        raise ValueError(f"Satélite debe ser uno de: {config.VALID_SATELLITES}")
-    if not config.is_valid_sensor(data['sensor']):
-        raise ValueError(f"Sensor debe ser uno de: {config.VALID_SENSORS}")
-    if not config.is_valid_level(data['nivel']):
-        raise ValueError(f"Nivel debe ser uno de: {config.VALID_LEVELS}")
-    if not config.is_valid_domain(data['dominio']):
-        raise ValueError(f"Dominio debe ser uno de: {config.VALID_DOMAINS}")
-    
-    # Validar bandas solo cuando aplican
-    if requiere_bandas:
-        data['bandas'] = config.validate_bandas(data['bandas'])
+    # 3.1 Validaciones de lógica de negocio (satélite, sensor, bandas, etc.)
+    try:
+        if not config.is_valid_satellite(data['sat']):
+            raise ValueError(f"Satélite debe ser uno de: {config.VALID_SATELLITES}")
+        if not config.is_valid_sensor(data['sensor']):
+            raise ValueError(f"Sensor debe ser uno de: {config.VALID_SENSORS}")
+        if not config.is_valid_level(data['nivel']):
+            raise ValueError(f"Nivel debe ser uno de: {config.VALID_LEVELS}")
+        if not config.is_valid_domain(data['dominio']):
+            raise ValueError(f"Dominio debe ser uno de: {config.VALID_DOMAINS}")
+        if requiere_bandas:
+            data['bandas'] = config.validate_bandas(data['bandas'])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # --- Validaciones de límites y espacio en disco ---
+    # Se realizan después de la validación de Pydantic y la preparación de datos.
+
+    # 4. Estimar archivos y tamaño para las validaciones
+    estimation_summary = config.estimate_files_summary(data)
+    archivos_estimados = estimation_summary["file_count"]
+    tamanio_estimado_mb = estimation_summary["total_size_mb"]
+
+    # 5. Validar contra límites de la consulta
+    if MAX_FILES_PER_QUERY > 0 and archivos_estimados > MAX_FILES_PER_QUERY:
+        raise HTTPException(
+            status_code=413, # Payload Too Large
+            detail=f"La consulta excede el límite de archivos permitidos ({archivos_estimados} estimados vs {MAX_FILES_PER_QUERY} máximo)."
+        )
+
+    if MAX_SIZE_MB_PER_QUERY > 0 and tamanio_estimado_mb > MAX_SIZE_MB_PER_QUERY:
+        raise HTTPException(
+            status_code=413,
+            detail=f"La consulta excede el límite de tamaño permitido ({tamanio_estimado_mb:.2f} MB estimados vs {MAX_SIZE_MB_PER_QUERY} MB máximo)."
+        )
+
+    # 6. Validar espacio en disco disponible
+    try:
+        disk_usage = shutil.disk_usage(DOWNLOAD_PATH)
+        free_space_mb = disk_usage.free / (1024 * 1024)
+        buffer_mb = MIN_FREE_SPACE_GB_BUFFER * 1024
+
+        if (free_space_mb - tamanio_estimado_mb) < buffer_mb:
+            raise HTTPException(
+                status_code=507, # Insufficient Storage
+                detail=f"Espacio en disco insuficiente. Se requieren {tamanio_estimado_mb:.2f} MB pero solo hay {free_space_mb:.2f} MB libres (considerando un búfer de {MIN_FREE_SPACE_GB_BUFFER} GB)."
+            )
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail=f"El directorio de descargas '{DOWNLOAD_PATH}' no existe.")
 
     return data, config
 
@@ -231,6 +284,7 @@ async def crear_solicitud(
     """
     try:
         # 1. Validar y preparar la solicitud usando la función de ayuda
+        #    Esta función ahora incluye las validaciones de límites y espacio.
         data, config = _validate_and_prepare_request(request_data)
         # 2. Procesar la solicitud ya validada y completada
         query_obj = processor.procesar_request(data, config)
@@ -259,6 +313,9 @@ async def crear_solicitud(
         from fastapi.responses import JSONResponse
         return JSONResponse(content=body, status_code=202, headers={"Location": f"/query/{consulta_id}"})
         
+    except HTTPException as e:
+        # Relanzar excepciones HTTP (como 413 o 507 de la validación)
+        raise e
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -270,13 +327,10 @@ async def validar_solicitud(request_data: Dict[str, Any] = Body(...)):
     """
     try:
         # 1. Validar y preparar la solicitud usando la función de ayuda
+        #    Esta función ahora incluye las validaciones de límites y espacio.
         data, config = _validate_and_prepare_request(request_data)
 
-        # 2. Procesar para obtener el resumen (sin guardar en DB)
-        query_obj = processor.procesar_request(data, config)
-        query_dict = query_obj.to_dict() # Mantenemos to_dict si es un método custom de la dataclass
-
-        # 3. Estimar archivos y tamaño usando el método completo de la config
+        # 2. Estimar archivos y tamaño usando el método completo de la config
         estimation_summary = config.estimate_files_summary(data)
 
         return {
@@ -285,11 +339,8 @@ async def validar_solicitud(request_data: Dict[str, Any] = Body(...)):
             "archivos_estimados": estimation_summary["file_count"],
             "tamanio_estimado_mb": estimation_summary["total_size_mb"]
         }
-    except ValueError as e:
-        # Convertir errores de validación de lógica de negocio en 400
-        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException as e:
-        # Relanzar excepciones HTTP que ya vienen preparadas (ej. 422 de Pydantic)
+        # Relanzar excepciones HTTP que ya vienen preparadas (ej. 422, 413, 507, etc.)
         raise e
 
 @app.post("/query/{consulta_id}/restart")
