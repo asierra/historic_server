@@ -9,6 +9,7 @@ from background_simulator import BackgroundSimulator
 from database import ConsultasDatabase
 import os
 from recover import RecoverFiles  # Importar el procesador real para la prueba de integración
+from settings import settings
 
 # --- Configuración de la Base de Datos de Prueba ---
 
@@ -24,9 +25,9 @@ def override_db_for_tests(monkeypatch):
     # 1. Crear una instancia de la DB de prueba
     test_db = ConsultasDatabase(db_path=TEST_DB_PATH)
     
-    # Establecer variables de entorno para el simulador para evitar errores de inicialización
-    monkeypatch.setenv("SIM_LOCAL_SUCCESS_RATE", "0.9")
-    monkeypatch.setenv("SIM_S3_SUCCESS_RATE", "0.8")
+    # Establecer valores en el objeto de settings para el simulador
+    monkeypatch.setattr(settings, "sim_local_success_rate", 0.9)
+    monkeypatch.setattr(settings, "sim_s3_success_rate", 0.8)
 
     # Crear directorio de descarga para las pruebas y configurar la variable de entorno
     os.makedirs(TEST_DOWNLOAD_PATH, exist_ok=True)
@@ -308,9 +309,9 @@ def test_recovery_query_is_generated_on_failure(monkeypatch):
     monkeypatch.setattr("main.generar_id_consulta", lambda: TEST_ID)
 
     # Forzar fallos en el simulador para que falle tanto en local como en S3.
-    # Esto se hace configurando las tasas de éxito a 0 a través de variables de entorno.
-    monkeypatch.setenv("SIM_LOCAL_SUCCESS_RATE", "0.0")
-    monkeypatch.setenv("SIM_S3_SUCCESS_RATE", "0.0")
+    monkeypatch.setattr(settings, "sim_local_success_rate", 0.0)
+    monkeypatch.setattr(settings, "sim_s3_success_rate", 0.0)
+    
     # Es necesario recrear el simulador para que tome las nuevas variables de entorno.
     monkeypatch.setattr(main, "recover", BackgroundSimulator(main.db))
 
@@ -395,6 +396,10 @@ def test_simulator_report_has_correct_sources_structure(monkeypatch):
 @pytest.fixture
 def real_io_fixture(monkeypatch):
     """Fixture para configurar el entorno para pruebas de I/O real."""
+    # Configurar settings para habilitar S3 y deshabilitar Lustre
+    monkeypatch.setattr(settings, "s3_fallback_enabled", True)
+    monkeypatch.setattr(settings, "lustre_enabled", True)  # Mantener habilitado para probar el fallback
+    
     # Usamos la misma DB de prueba, pero con RecoverFiles
     test_db = main.db # Ya está parcheada por el fixture autouse
     real_recover = RecoverFiles(

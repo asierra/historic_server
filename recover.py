@@ -1,4 +1,3 @@
-import os
 import logging
 import shutil
 import re
@@ -13,10 +12,11 @@ from collections import defaultdict
 import time
 from s3_recover import S3RecoverFiles
 from config import SatelliteConfigGOES
-from utils.env import env_bool
+from settings import settings
 
 # Instanciar configuración para referenciar listas válidas (bandas/productos)
 _SAT_CONFIG = SatelliteConfigGOES()
+
 
 # Expresión regular para extraer el timestamp de inicio del nombre de archivo
 _FILENAME_TIMESTAMP_RE = re.compile(r'_s(\d{4})(\d{3})(\d{2})\d+.*')
@@ -142,34 +142,21 @@ class RecoverFiles:
         self.base_download_path = Path(base_download_path)
         self.logger = logging.getLogger(__name__)
         self.executor = executor
-        self.s3_fallback_enabled = (
-            bool(s3_fallback_enabled)
-            if s3_fallback_enabled is not None
-            else env_bool("S3_FALLBACK_ENABLED", True)
-        )
-        # Flag unificado para Lustre
-        self.lustre_enabled = (
-            bool(lustre_enabled)
-            if lustre_enabled is not None
-            else env_bool("LUSTRE_ENABLED", True)
-        )
+        
+        self.s3_fallback_enabled = settings.s3_fallback_enabled if s3_fallback_enabled is None else s3_fallback_enabled
+        self.lustre_enabled = settings.lustre_enabled if lustre_enabled is None else lustre_enabled
 
-        self.FILE_PROCESSING_TIMEOUT_SECONDS = int(os.getenv("FILE_PROCESSING_TIMEOUT_SECONDS", "120"))
-        self.S3_RETRY_ATTEMPTS = 3
-        self.S3_RETRY_BACKOFF_SECONDS = 2
+        self.S3_RETRY_ATTEMPTS = settings.S3_RETRY_ATTEMPTS
+        self.S3_RETRY_BACKOFF_SECONDS = settings.S3_RETRY_BACKOFF_SECONDS
         self.GOES19_OPERATIONAL_DATE = datetime(2025, 4, 1, tzinfo=timezone.utc)
         self.lustre = LustreRecoverFiles(source_data_path, self.logger)
 
         # Inicializa self.max_workers ANTES de usarla
-        self.max_workers = (
-            max_workers
-            or getattr(executor, "max_workers", None)
-            or int(os.getenv("HISTORIC_MAX_WORKERS", "16"))
-        )
+        self.max_workers = max_workers or getattr(executor, "max_workers", settings.max_workers)
 
-        self.s3 = S3RecoverFiles(self.logger, self.max_workers, self.S3_RETRY_ATTEMPTS, self.S3_RETRY_BACKOFF_SECONDS)
+        self.s3 = S3RecoverFiles(self.logger, self.max_workers)
         # Limitar tamaño de listas en el reporte final para grandes volúmenes
-        self.MAX_FILES_IN_REPORT = int(os.getenv("MAX_FILES_IN_REPORT", "1000"))
+        self.MAX_FILES_IN_REPORT = 1000 # TODO: Mover a settings
 
     def procesar_consulta(self, consulta_id: str, query_dict: Dict):
         try:
@@ -230,11 +217,11 @@ class RecoverFiles:
                         except TimeoutError:
                             self.logger.error(f"❌ Timeout en archivo {archivo_fuente.name}")
                             objetivos_fallidos_local.append(archivo_fuente)
-                            mensaje = f"Fallo por timeout {i+1}/{total_pendientes} ({archivo_fuente.name})"
+                            mensaje = f"Falla por timeout {i+1}/{total_pendientes} ({archivo_fuente.name})"
                         except Exception as e:
                             self.logger.error(f"❌ Error procesando el archivo {archivo_fuente.name}: {e}")
                             objetivos_fallidos_local.append(archivo_fuente)
-                            mensaje = f"Fallo {i+1}/{total_pendientes} ({archivo_fuente.name})"
+                            mensaje = f"Falla {i+1}/{total_pendientes} ({archivo_fuente.name})"
                         progreso = 20 + int(((i + 1) / total_pendientes) * 60)
                         self.db.actualizar_estado(consulta_id, "procesando", progreso, mensaje)
             else:
@@ -286,7 +273,7 @@ class RecoverFiles:
                 s3_recuperados, objetivos_fallidos_s3 = self.s3.download_files(
                     consulta_id, objetivos_finales_s3, directorio_destino, self.db
                 )
-                # Combinar fallos locales y de S3
+                # Combinar fallas locales y de S3
                 objetivos_fallidos_final = list(objetivos_fallidos_local) + list(objetivos_fallidos_s3)
             else:
                 s3_recuperados = []

@@ -6,3 +6,4 @@ s3fs
 pytest
 requests
 httpx
+pydantic-settings

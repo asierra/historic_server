@@ -30,38 +30,37 @@ Permitir que usuarios y sistemas externos puedan generar consultas complejas de 
 
 La aplicación se configura mediante variables de entorno:
 
-| Variable                        | Descripción                                                              | Valor por defecto |
-|---------------------------------|--------------------------------------------------------------------------|-------------------|
-| `PROCESSOR_MODE`                | Modo del procesador de fondo: real o simulador                          | `real`            |
-| `HISTORIC_DB_PATH`              | Ruta al archivo SQLite                                                   | `consultas_goes.db` |
-| `HISTORIC_SOURCE_PATH`          | Ruta raíz del almacenamiento primario (Lustre)                          | `/depot/goes16`    |
-| `HISTORIC_DOWNLOAD_PATH`        | Directorio de descargas por consulta                                     | `/data/tmp`        |
-| `HISTORIC_MAX_WORKERS`          | Número de procesos para E/S paralela                                    | `8`                |
-| `S3_FALLBACK_ENABLED`           | Habilita o deshabilita el fallback a S3 (true/false, 1/0)               | `true`            |
-| `LUSTRE_ENABLED`                | Habilita o deshabilita el uso de Lustre (true/false, 1/0)               | `true`            |
-| `ENV_FILE`                      | Archivo .env a cargar al inicio                                          | `.env`            |
-| `FILE_PROCESSING_TIMEOUT_SECONDS` | Tiempo máximo por archivo (segundos)                                     | `120`             |
-| `SIM_LOCAL_SUCCESS_RATE`        | Tasa de éxito local en modo simulador (0.0–1.0)                          | `0.8`             |
-| `SIM_S3_SUCCESS_RATE`           | Tasa de éxito S3 en modo simulador (0.0–1.0)                             | `0.5`             |
-| `MAX_FILES_PER_QUERY`           | Límite de archivos estimados por consulta (0 = sin límite)               | `0`               |
-| `MAX_SIZE_MB_PER_QUERY`         | Límite de tamaño estimado en MB por consulta (0 = sin límite)            | `0`               |
-| `MIN_FREE_SPACE_GB_BUFFER`      | Búfer de seguridad en GB que debe quedar libre en disco                  | `10`              |
+| Variable                        | Descripción                                                              | Valor por defecto   |
+|---------------------------------|--------------------------------------------------------------------------|---------------------|
+| `DB_PATH`                       | Ruta al archivo SQLite                                                   | `consultas_goes.db` |
+| `DOWNLOAD_PATH`                 | Directorio de descargas por consulta                                     | `/data/tmp`         |
+| `FILE_PROCESSING_TIMEOUT_SECONDS` | Tiempo máximo por archivo (segundos)                                     | `120`               |
+| `LUSTRE_ENABLED`                | Habilita o deshabilita el uso de Lustre (true/false, 1/0)               | `true`              |
+| `MAX_FILES_PER_QUERY`           | Límite de archivos estimados por consulta (0 = sin límite)               | `0`                 |
+| `MAX_SIZE_MB_PER_QUERY`         | Límite de tamaño estimado en MB por consulta (0 = sin límite)            | `0`                 |
+| `MAX_WORKERS`                   | Número de procesos para E/S paralela                                    | `8`                 |
+| `MIN_FREE_SPACE_GB_BUFFER`      | Búfer de seguridad en GB que debe quedar libre en disco                  | `10`                |
+| `PROCESSOR_MODE`                | Modo del procesador de fondo: real o simulador                          | `real`              |
+| `S3_CONNECT_TIMEOUT`            | Timeout de conexión para S3 (segundos)                                   | `5`                 |
+| `S3_FALLBACK_ENABLED`           | Habilita o deshabilita el fallback a S3 (true/false, 1/0)               | `true`              |
+| `S3_PROGRESS_STEP`              | Actualizar progreso de descarga S3 cada N archivos                       | `100`               |
+| `S3_READ_TIMEOUT`               | Timeout de lectura para S3 (segundos)                                    | `30`                |
+| `S3_RETRY_ATTEMPTS`             | Número de reintentos para operaciones S3                                 | `3`                 |
+| `S3_RETRY_BACKOFF_SECONDS`      | Factor de backoff para reintentos S3 (segundos)                          | `1.0`               |
+| `SIM_LOCAL_SUCCESS_RATE`        | Tasa de éxito local en modo simulador (0.0–1.0)                          | `0.8`               |
+| `SIM_S3_SUCCESS_RATE`           | Tasa de éxito S3 en modo simulador (0.0–1.0)                             | `0.5`               |
+| `SOURCE_PATH`                   | Ruta raíz del almacenamiento primario (Lustre)                          | `/depot/goes16`     |
 
 ### Perfiles de entorno (.env)
 ```ini
 # .env.v1
 PROCESSOR_MODE=real
-HISTORIC_DB_PATH=/data/db/historic_v1.db
-HISTORIC_SOURCE_PATH=/depot/goes16
-HISTORIC_DOWNLOAD_PATH=/data/tmp/v1
-HISTORIC_MAX_WORKERS=8
+DB_PATH=/data/db/historic_v1.db
+SOURCE_PATH=/depot/goes16
+DOWNLOAD_PATH=/data/tmp/v1
+MAX_WORKERS=8
 S3_FALLBACK_ENABLED=true
 LUSTRE_ENABLED=1
-```
-
-Arranque con perfil:
-```bash
-ENV_FILE=.env.v1 uvicorn main:app --host 0.0.0.0 --port 9041
 ```
 
 ## Uso de la API
@@ -187,7 +186,7 @@ Códigos y seguridad:
 - 409 si se intenta purgar una consulta en proceso sin `force=true`
 
 Parámetros:
-- `purge` (bool, opcional): si es `true`, elimina el directorio `/data/tmp/<ID>` (o el definido en `HISTORIC_DOWNLOAD_PATH`).
+- `purge` (bool, opcional): si es `true`, elimina el directorio `/data/tmp/<ID>` (o el definido en `DOWNLOAD_PATH`).
 - `force` (bool, opcional): si es `true`, permite purgar aunque la consulta esté en estado `procesando`.
 
 Ejemplos:

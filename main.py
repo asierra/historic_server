@@ -18,11 +18,12 @@ import os
 import shutil
 import secrets
 import string
+from settings import settings
 from pebble import ProcessPool
-from utils.env import env_bool
 
 # --- Configuración de Logging ---
 # Rotación de logs para producción con salida a archivo y consola.
+# TODO: Mover configuración de logging a settings.py
 LOG_FILE = os.getenv("LOG_FILE", "app.log")
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024)))  # 10MB
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "7"))
@@ -64,6 +65,7 @@ app = FastAPI(
 )
 
 # --- Seguridad opcional con API Key ---
+# TODO: Mover a settings.py
 API_KEY = os.getenv("API_KEY")
 
 def _require_api_key(request: Request):
@@ -82,38 +84,38 @@ AVAILABLE_SATELLITE_CONFIGS = {
 # --- Configuración y Componentes Dinámicos ---
 
 # Usar variables de entorno para configurar rutas clave
-DB_PATH = os.getenv("HISTORIC_DB_PATH", DATABASE_PATH)
-SOURCE_DATA_PATH = os.getenv("HISTORIC_SOURCE_PATH", "/depot/goes16")
-DOWNLOAD_PATH = os.getenv("HISTORIC_DOWNLOAD_PATH", "/data/tmp")
+DB_PATH = settings.db_path
+SOURCE_DATA_PATH = settings.source_path
+DOWNLOAD_PATH = settings.download_path
 
 # --- Límites de consulta y disco ---
-MAX_FILES_PER_QUERY = int(os.getenv("MAX_FILES_PER_QUERY", "0")) # 0 = sin límite
-MAX_SIZE_MB_PER_QUERY = int(os.getenv("MAX_SIZE_MB_PER_QUERY", "0")) # 0 = sin límite
-MIN_FREE_SPACE_GB_BUFFER = int(os.getenv("MIN_FREE_SPACE_GB_BUFFER", "10")) # Búfer de seguridad en GB
+MAX_FILES_PER_QUERY = settings.max_files_per_query
+MAX_SIZE_MB_PER_QUERY = settings.max_size_mb_per_query
+MIN_FREE_SPACE_GB_BUFFER = settings.min_free_space_gb_buffer
 
 # Selección del procesador de background mediante variable de entorno
-PROCESSOR_MODE = os.getenv("PROCESSOR_MODE", "real") # 'real' o 'simulador'
+PROCESSOR_MODE = settings.processor_mode
 
 # Crear un único ThreadPoolExecutor para toda la aplicación
-MAX_WORKERS = int(os.getenv("HISTORIC_MAX_WORKERS", "8"))
+MAX_WORKERS = settings.max_workers
 executor = ProcessPool(max_workers=MAX_WORKERS)
 
 # Inicializar componentes
-db = ConsultasDatabase(db_path=DB_PATH)
+db = ConsultasDatabase(db_path=str(DB_PATH))
 processor = HistoricQueryProcessor()
 
 # Instanciar el procesador de background según el modo
 if PROCESSOR_MODE == "real":
     # Pasamos el executor compartido al constructor de RecoverFiles
-    S3_FALLBACK_ENABLED = env_bool("S3_FALLBACK_ENABLED", True)
+    S3_FALLBACK_ENABLED = settings.s3_fallback_enabled
 
     recover = RecoverFiles(
         db=db,
-        source_data_path=SOURCE_DATA_PATH,
-        base_download_path=DOWNLOAD_PATH,
+        source_data_path=str(SOURCE_DATA_PATH),
+        base_download_path=str(DOWNLOAD_PATH),
         executor=executor,
         s3_fallback_enabled=S3_FALLBACK_ENABLED,
-        lustre_enabled=env_bool("LUSTRE_ENABLED", True)
+        lustre_enabled=settings.lustre_enabled
     )
 else:
     recover = BackgroundSimulator(db)

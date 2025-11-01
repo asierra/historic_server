@@ -6,18 +6,16 @@ from typing import List, Dict, Optional
 from datetime import datetime, timezone
 from pebble import ProcessPool, ThreadPool
 from concurrent.futures import as_completed
-import os
+from settings import settings
+
 
 
 class S3RecoverFiles:
-    def __init__(self, logger, max_workers, retry_attempts, retry_backoff):
+    def __init__(self, logger, max_workers):
         self.logger = logger
         self.max_workers = max_workers
-        # Guardar defaults para no contaminar con jitter entre invocaciones
-        self.default_retry_attempts = int(retry_attempts)
-        self.default_retry_backoff = float(retry_backoff)
-        self.retry_attempts = int(retry_attempts)
-        self.retry_backoff = float(retry_backoff)
+        self.retry_attempts = settings.S3_RETRY_ATTEMPTS
+        self.retry_backoff = settings.S3_RETRY_BACKOFF_SECONDS
 
     def get_sat_code_for_date(self, satellite_name: str, request_date: datetime, goes19_operational_date: datetime) -> str:
         if request_date.tzinfo is None:
@@ -51,14 +49,10 @@ class S3RecoverFiles:
         s3_bucket = f"noaa-goes{sat_code.replace('G', '')}"
         s3_product_names = self.get_s3_product_names(query_dict)
         # Timeouts y reintentos para robustez en producción
-        connect_timeout = int(os.getenv("S3_CONNECT_TIMEOUT", "5"))
-        read_timeout = int(os.getenv("S3_READ_TIMEOUT", "30"))
-        # Leer ajustes de reintento desde env con defaults inmutables del constructor
-        self.retry_attempts = int(os.getenv("S3_RETRY_ATTEMPTS", str(self.default_retry_attempts)))
-        base_backoff = float(os.getenv("S3_RETRY_BACKOFF_SECONDS", str(self.default_retry_backoff)))
+        base_backoff = self.retry_backoff
         jitter = random.uniform(0, 0.5)
         self.retry_backoff = max(1.0, base_backoff) + jitter
-        s3 = s3fs.S3FileSystem(anon=True, config_kwargs={'connect_timeout': connect_timeout, 'read_timeout': read_timeout})
+        s3 = s3fs.S3FileSystem(anon=True, config_kwargs={'connect_timeout': settings.S3_CONNECT_TIMEOUT, 'read_timeout': settings.S3_READ_TIMEOUT})
         objetivos_s3_a_descargar = set()
         bandas_solicitadas = query_dict.get('bandas')
         # ...resto del método...
@@ -122,16 +116,14 @@ class S3RecoverFiles:
 
 
     def download_files(self, consulta_id: str, archivos_s3: List[str], directorio_destino: Path, db) -> (List[Path], List[str]):
-        connect_timeout = int(os.getenv("S3_CONNECT_TIMEOUT", "5"))
-        read_timeout = int(os.getenv("S3_READ_TIMEOUT", "30"))
-        s3 = s3fs.S3FileSystem(anon=True, config_kwargs={'connect_timeout': connect_timeout, 'read_timeout': read_timeout})
+        s3 = s3fs.S3FileSystem(anon=True, config_kwargs={'connect_timeout': settings.S3_CONNECT_TIMEOUT, 'read_timeout': settings.S3_READ_TIMEOUT})
         objetivos_aun_fallidos = []
         s3_recuperados_set = set()
 
         # Normalizar objetivos únicos
         objetivos_unicos = list(set(archivos_s3))
         total_obj = len(objetivos_unicos) or 1
-        update_every = int(os.getenv("S3_PROGRESS_STEP", "100")) or 100
+        update_every = settings.S3_PROGRESS_STEP
 
         # Pre-contar archivos ya existentes para reflejar progreso real tras reinicio
         existentes = []

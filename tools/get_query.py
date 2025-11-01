@@ -8,7 +8,7 @@ Uso básico:
     python tools/get_query.py <consulta_id>
 
 Opciones:
-    --db PATH         Ruta a la base de datos SQLite (por defecto usa $HISTORIC_DB_PATH o consultas_goes.db)
+    --db PATH         Ruta a la base de datos SQLite (por defecto usa $DB_PATH o consultas_goes.db)
     --out FILE        Escribe la salida a un archivo en lugar de stdout
     --raw             Imprime minificado (sin pretty-print)
     --original        Devuelve solo el objeto '_original_request' si existe
@@ -20,7 +20,7 @@ import sqlite3
 import sys
 from typing import Optional
 
-DEFAULT_DB = os.environ.get("HISTORIC_DB_PATH", "consultas_goes.db")
+DEFAULT_DB = os.environ.get("DB_PATH", "consultas_goes.db")
 
 
 def fetch_query(db_path: str, consulta_id: str) -> Optional[str]:

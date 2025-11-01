@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 import main
 from background_simulator import BackgroundSimulator
 from database import ConsultasDatabase
+from settings import settings
 
 TEST_DB_PATH = "test_consultas_sources.db"
 TEST_DOWNLOAD_PATH = "./test_downloads_sources"
@@ -63,8 +64,8 @@ def test_lustre_returns_tgz_s3_returns_nc_for_all_cases(monkeypatch):
         - En ambos casos anteriores => s3: .nc (nunca .tgz)
     """
     # Fase 1: Forzar Lustre
-    monkeypatch.setenv("SIM_LOCAL_SUCCESS_RATE", "1.0")
-    monkeypatch.setenv("SIM_S3_SUCCESS_RATE", "0.0")
+    monkeypatch.setattr(settings, "sim_local_success_rate", 1.0)
+    monkeypatch.setattr(settings, "sim_s3_success_rate", 0.0)
     monkeypatch.setattr(main, "recover", BackgroundSimulator(main.db))
 
     # 1A) L1b + bandas ALL (FD)
@@ -103,8 +104,8 @@ def test_lustre_returns_tgz_s3_returns_nc_for_all_cases(monkeypatch):
     assert s3_files == []
 
     # Fase 2: Forzar S3
-    monkeypatch.setenv("SIM_LOCAL_SUCCESS_RATE", "0.0")
-    monkeypatch.setenv("SIM_S3_SUCCESS_RATE", "1.0")
+    monkeypatch.setattr(settings, "sim_local_success_rate", 0.0)
+    monkeypatch.setattr(settings, "sim_s3_success_rate", 1.0)
     monkeypatch.setattr(main, "recover", BackgroundSimulator(main.db))
 
     # 2A) L1b + bandas ALL (FD) -> S3 debe devolver .nc

@@ -6,6 +6,7 @@ import random
 from typing import Dict
 from database import ConsultasDatabase
 from collections import defaultdict
+from settings import settings
 
 
 class BackgroundSimulator():
@@ -17,8 +18,8 @@ class BackgroundSimulator():
         self.db = db
         self.nombre = "simulador"
         # Hacer las probabilidades de éxito configurables
-        self.local_success_rate = float(os.getenv("SIM_LOCAL_SUCCESS_RATE", "0.8"))
-        self.s3_success_rate = float(os.getenv("SIM_S3_SUCCESS_RATE", "0.5"))
+        self.local_success_rate = settings.sim_local_success_rate
+        self.s3_success_rate = settings.sim_s3_success_rate
         # Añadir atributos para compatibilidad con el endpoint /health
         self.lustre_enabled = True
         self.s3_fallback_enabled = True
