@@ -20,26 +20,11 @@ import secrets
 import string
 from settings import settings
 from pebble import ProcessPool
+from logging_config import setup_logging
 
 # --- Configuración de Logging ---
-# Rotación de logs para producción con salida a archivo y consola.
-# TODO: Mover configuración de logging a settings.py
-LOG_FILE = os.getenv("LOG_FILE", "app.log")
-LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024)))  # 10MB
-LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "7"))
-
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-# Limpiar handlers previos (por si el módulo se recarga en tests)
-root_logger.handlers = []
-
-rotating_handler = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT)
-rotating_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-
-root_logger.addHandler(rotating_handler)
-root_logger.addHandler(console_handler)
+setup_logging()
+log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -48,14 +33,14 @@ async def lifespan(app: FastAPI):
     se ejecuta al iniciar, y el código después se ejecuta al apagar.
     """
     # Código de inicio (si fuera necesario)
-    logging.info("🚀 Servidor iniciando...")
+    log.info("🚀 Servidor iniciando...")
     yield
     # Código de apagado
-    logging.info("⏳ Servidor recibiendo señal de apagado...")
-    logging.info("   Esperando a que las tareas de fondo se completen...")
+    log.info("⏳ Servidor recibiendo señal de apagado...")
+    log.info("   Esperando a que las tareas de fondo se completen...")
     executor.close()
     executor.join()
-    logging.info("✅ Todas las tareas de fondo han finalizado. Servidor apagado.")
+    log.info("✅ Todas las tareas de fondo han finalizado. Servidor apagado.")
 
 app = FastAPI(
     title="LANOT Historic Server",

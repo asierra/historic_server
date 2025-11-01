@@ -244,7 +244,7 @@ Una vez que el estado es `completado`, usa este endpoint para obtener el reporte
 ```
 
 Notas de estado y progreso:
-- Etapas derivadas comunes (en `detalles` si usas `?detalles=true`):
+- Etapas derivadas comunes:
     - "preparando" ("preparando entorno")
     - "recuperando-local" (mensajes como "identificados", "procesando archivo", "recuperando archivo")
     - "s3-listado" ("descargas s3 pendientes")
@@ -325,4 +325,54 @@ export LOG_BACKUP_COUNT=10
 export S3_CONNECT_TIMEOUT=5
 export S3_READ_TIMEOUT=30
 export API_KEY=mi_secreto
+```
+
+## Sistema de Logging
+
+El proyecto utiliza la librería `structlog` para generar logs estructurados, lo cual es fundamental para la monitorización y depuración en un entorno de producción.
+
+### Formato de Logs
+
+El sistema está configurado para funcionar de dos maneras:
+
+1.  **Desarrollo (Consola)**: Si la aplicación se ejecuta en una terminal interactiva, los logs se mostrarán en un formato legible para humanos y con colores, optimizado para la depuración durante el desarrollo.
+
+2.  **Producción (JSON)**: Si la aplicación se ejecuta en un entorno no interactivo (como un contenedor Docker, un servicio de `systemd`, etc.), los logs se generarán en formato **JSON**. Este formato es el estándar para sistemas de recolección de logs como Datadog, Splunk o el stack ELK, ya que permite indexar, buscar y filtrar los logs de manera eficiente.
+
+### Contexto Automático con `consulta_id`
+
+La ventaja más importante de `structlog` en este proyecto es su capacidad para manejar el contexto. Al inicio del procesamiento de una solicitud, el `consulta_id` se enlaza (`bind`) al logger. A partir de ese momento, **todos los logs generados** durante el ciclo de vida de esa solicitud incluirán automáticamente el `consulta_id`, sin necesidad de añadirlo manualmente en cada mensaje.
+
+Esto permite seguir la traza completa de una solicitud a través de diferentes funciones y módulos con una simple búsqueda.
+
+### ¿Cómo Registrar un Evento?
+
+Para mantener la estructura, los logs deben registrarse de la siguiente manera:
+
+1.  Obtener una instancia del logger: `log = structlog.get_logger(__name__)`
+2.  El mensaje principal debe ser un identificador corto y estático.
+3.  Los datos dinámicos deben pasarse como argumentos `key=value`.
+
+**Ejemplo práctico:**
+
+```python
+# Forma INCORRECTA (estilo antiguo):
+log.info(f"S3 progreso: {completados}/{total_obj}")
+
+# Forma CORRECTA (con structlog):
+log.info("s3_download_progress", completados=completados, total=total_obj)
+```
+
+Salida en formato JSON:
+
+```json
+{
+  "event": "s3_download_progress",
+  "completados": 50,
+  "total": 200,
+  "consulta_id": "aBcDeF12",
+  "log_level": "info",
+  "timestamp": "2023-11-21T10:30:00.123456Z",
+  "logger": "s3_recover"
+}
 ```

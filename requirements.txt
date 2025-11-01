@@ -7,3 +7,4 @@ pytest
 requests
 httpx
 pydantic-settings
+structlog
