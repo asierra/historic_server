@@ -59,18 +59,22 @@ class SatelliteConfigGOES(SatelliteConfigBase):
         # L2 - Productos (tamaño en MB)
         "L2": {
             "fd": {
-                "ACHA": 35, "ACM": 35, "ACTP": 35, "AOD": 10, "CMIP": 600, "DMW": 1,
-                "LST": 10, "RRQPE": 15, "SST": 25, "TPW": 15,
+                "ACHA": 35, "ACM": 35, "ACTP": 35, "AOD": 10, "CMIP": 600, "DMW": 1, "LST": 10,
                 # Mapeos adicionales basados en productos similares
                 "CODD": 35, "CODN": 35, "CPSD": 35, "CPSN": 35, "CTP": 35,
-                "ACHT": 35, "DMWV": 1, "AVIATION_FOG": 15, "ADP": 35
+                "ACHT": 35, "DMWV": 1, "AVIATION_FOG": 15, "ADP": 35,
+                # Productos S3-only con pesos actualizados
+                "DSI": 3.15, "DSR": 17.65, "FDC": 1.71, "RRQPE": 1.44,
+                "RSR": 17.58, "SST": 24.39, "TPW": 0.93
             },
             "conus": {
                 "ACHA": 20, "ACM": 20, "ACTP": 20, "AOD": 6.5, "CMIP": 180, "DMW": 1,
-                "LST": 5, "RRQPE": 5, "SST": 15, "TPW": 5,
+                "LST": 5, "RRQPE": 5, "SST": 15,
                 # Mapeos adicionales basados en productos similares  
                 "CODD": 20, "CODN": 20, "CPSD": 20, "CPSN": 20, "CTP": 20,
-                "ACHT": 20, "DMWV": 1, "AVIATION_FOG": 5, "ADP": 20
+                "ACHT": 20, "DMWV": 1, "AVIATION_FOG": 5, "ADP": 20,
+                # Productos S3-only con pesos actualizados
+                "DSI": 0.71, "FDC": 0.40, "TPW": 0.23
             }
         }
     }
