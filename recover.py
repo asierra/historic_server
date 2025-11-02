@@ -291,8 +291,13 @@ class RecoverFiles:
             # 6. Generar reporte final
             all_files_in_destination = [f for f in directorio_destino.iterdir() if f.is_file()]
             self.db.actualizar_estado(consulta_id, "procesando", 95, "Generando reporte final")
+            
+            # Obtener la consulta para acceder al timestamp de creación
+            consulta_db = self.db.obtener_consulta(consulta_id)
+            timestamp_creacion = consulta_db.get("timestamp_creacion") if consulta_db else datetime.now().isoformat()
+
             resultados_finales = self._generar_reporte_final(
-                consulta_id, all_files_in_destination, s3_recuperados, directorio_destino, objetivos_fallidos_final, query_dict
+                consulta_id, all_files_in_destination, s3_recuperados, directorio_destino, objetivos_fallidos_final, query_dict, timestamp_creacion
             )
             # Mensaje final breve y legible
             total_recuperados = resultados_finales.get("total_archivos", 0)
@@ -355,8 +360,20 @@ class RecoverFiles:
         
         return None
 
-    def _generar_reporte_final(self, consulta_id: str, all_files_in_destination: List[Path], s3_recuperados: List[Path], directorio_destino: Path, objetivos_fallidos: List[Path], query_original: Dict) -> Dict:
+    def _generar_reporte_final(self, consulta_id: str, all_files_in_destination: List[Path], s3_recuperados: List[Path], directorio_destino: Path, objetivos_fallidos: List[Path], query_original: Dict, timestamp_creacion_iso: str) -> Dict:
         """Genera el diccionario de resultados finales."""
+        # --- Cálculo de la duración total del procesamiento ---
+        timestamp_finalizacion = datetime.now()
+        duracion_str = "N/A"
+        try:
+            # Convertir ambos timestamps a objetos datetime
+            ts_inicio = datetime.fromisoformat(timestamp_creacion_iso)
+            # Calcular la diferencia
+            delta = timestamp_finalizacion - ts_inicio
+            duracion_str = str(delta).split('.')[0] # Formato HH:MM:SS
+        except (ValueError, TypeError):
+            self.logger.warning(f"No se pudo calcular la duración para la consulta {consulta_id} debido a un timestamp inválido.")
+
         # Optimizar: usar comparación por nombre con set para evitar O(n^2)
         s3_names_full = [p.name for p in s3_recuperados]
         s3_names_set = set(s3_names_full)
@@ -426,7 +443,8 @@ class RecoverFiles:
             "total_mb": tamaño_mb,
             "ruta_destino": str(directorio_destino),
             "timestamp_procesamiento": datetime.now().isoformat(),
-            "consulta_recuperacion": consulta_recuperacion
+            "consulta_recuperacion": consulta_recuperacion,
+            "duracion_procesamiento": duracion_str
         }
 
     def _producto_requiere_bandas(self, nivel: str, producto: str) -> bool:
