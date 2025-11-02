@@ -25,14 +25,14 @@ class SatelliteConfigGOES(SatelliteConfigBase):
         "L2": {
             "fd": {
                 "ACHA": 10, "ACM": 10, "ACTP": 10, "AOD": 10, "CMIP": 10, "DMW": 60,
-                "LST": 10, "Rainfall": 10, "SST": 60, "TPW": 10,
+                "LST": 10, "RRQPE": 10, "SST": 60, "TPW": 10,
                 # Agregamos mapeos adicionales por compatibilidad
                 "CODD": 10, "CODN": 10, "CPSD": 10, "CPSN": 10, "CTP": 10, 
                 "ACHT": 10, "DMWV": 60, "AVIATION_FOG": 10, "ADP": 10
             },
             "conus": {
                 "ACHA": 5, "ACM": 5, "ACTP": 5, "AOD": 5, "CMIP": 5, "DMW": 15,
-                "LST": 5, "Rainfall": 5, "SST": 60, "TPW": 5,
+                "LST": 5, "RRQPE": 5, "SST": 60, "TPW": 5,
                 # Agregamos mapeos adicionales por compatibilidad  
                 "CODD": 5, "CODN": 5, "CPSD": 5, "CPSN": 5, "CTP": 5,
                 "ACHT": 5, "DMWV": 15, "AVIATION_FOG": 5, "ADP": 5
@@ -60,14 +60,14 @@ class SatelliteConfigGOES(SatelliteConfigBase):
         "L2": {
             "fd": {
                 "ACHA": 35, "ACM": 35, "ACTP": 35, "AOD": 10, "CMIP": 600, "DMW": 1,
-                "LST": 10, "Rainfall": 15, "SST": 25, "TPW": 15,
+                "LST": 10, "RRQPE": 15, "SST": 25, "TPW": 15,
                 # Mapeos adicionales basados en productos similares
                 "CODD": 35, "CODN": 35, "CPSD": 35, "CPSN": 35, "CTP": 35,
                 "ACHT": 35, "DMWV": 1, "AVIATION_FOG": 15, "ADP": 35
             },
             "conus": {
                 "ACHA": 20, "ACM": 20, "ACTP": 20, "AOD": 6.5, "CMIP": 180, "DMW": 1,
-                "LST": 5, "Rainfall": 5, "SST": 15, "TPW": 5,
+                "LST": 5, "RRQPE": 5, "SST": 15, "TPW": 5,
                 # Mapeos adicionales basados en productos similares  
                 "CODD": 20, "CODN": 20, "CPSD": 20, "CPSN": 20, "CTP": 20,
                 "ACHT": 20, "DMWV": 1, "AVIATION_FOG": 5, "ADP": 20
@@ -109,10 +109,16 @@ class SatelliteConfigGOES(SatelliteConfigBase):
     def VALID_PRODUCTS(self) -> List[str]:
         return [
             "ADP", "AOD", "ACM", "CMIP", "CODD", "CODN", "CPSD", "CPSN",
-            "ACHA", "ACTP", "CTP", "ACHT", "Rainfall", "SST", "TPW", 
-            "DMW", "DMWV", "LST", "AVIATION_FOG", "VAA"
+            "ACHA", "ACTP", "CTP", "ACHT", "DMW", "DMWV", "LST", "AVIATION_FOG", 
+            "DSI", "DSR", "FDC", "RRQPE", "RSR", "SST", "TPW", "VAA"
         ]
 
+    @property
+    def S3_ONLY_PRODUCTS(self) -> List[str]:
+        """Productos que se sabe que solo existen en S3 y no en los .tgz de Lustre."""
+        return [
+            "DSI", "DSR", "FDC", "RRQPE", "RSR", "SST", "TPW", "VAA"
+        ]
     @property
     def VALID_BANDAS(self) -> List[str]:
         return [f"{i:02d}" for i in range(1, 17)]

@@ -168,12 +168,21 @@ class RecoverFiles:
             objetivos_fallidos_local = []
             archivos_pendientes_local: List[Path] = []
 
+            # --- Optimización: Separar productos locales de los exclusivos de S3 ---
+            productos_req_originales = query_dict.get('productos', []) or []
+            s3_only_products = set(_SAT_CONFIG.S3_ONLY_PRODUCTS)
+            
+            productos_para_lustre = [p for p in productos_req_originales if p.upper() not in s3_only_products]
+            query_para_lustre = query_dict.copy()
+            query_para_lustre['productos'] = productos_para_lustre
+            # --------------------------------------------------------------------
+
             if self.lustre_enabled:
                 # 2. Descubrir y filtrar archivos locales.
                 # Se elimina la lógica especial para 'ALL' en esta etapa.
                 # La decisión de copiar el tgz completo o extraer se toma por archivo en _process_safe_recover_file.
-                archivos_a_procesar_local = self.lustre.discover_and_filter_files(query_dict)
-                inaccessible_files_local = []  # Si tienes lógica para esto, agrégala aquí
+                archivos_a_procesar_local = self.lustre.discover_and_filter_files(query_para_lustre)
+                inaccessible_files_local = []
 
                 # 3. Escanear destino
                 if archivos_a_procesar_local:
@@ -191,8 +200,8 @@ class RecoverFiles:
                 # 4. Procesar archivos pendientes en paralelo
                 # Extraer bandas y productos originales del request para lógica tgz
                 original_req = query_dict.get('_original_request', {})
-                bandas_original = original_req.get('bandas', query_dict.get('bandas'))
-                productos_original = original_req.get('productos', query_dict.get('productos'))
+                bandas_original = original_req.get('bandas', [])
+                productos_original_para_lustre = original_req.get('productos', [])
                 if archivos_pendientes_local:
                     future_to_objetivo = {
                         self.executor.schedule(
@@ -201,8 +210,8 @@ class RecoverFiles:
                                 archivo_a_procesar, 
                                 directorio_destino, 
                                 query_dict.get('nivel'), 
-                                productos_original, 
-                                bandas_original
+                                productos_original_para_lustre, # Usar la lista completa original para la lógica interna
+                                bandas_original # Usar la lista original para la lógica interna
                             ), 
                             timeout=self.FILE_PROCESSING_TIMEOUT_SECONDS
                         ): archivo_a_procesar
