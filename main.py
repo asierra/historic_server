@@ -5,7 +5,7 @@ from recover import RecoverFiles # Importar el procesador real
 from processors import HistoricQueryProcessor
 from schemas import HistoricQueryRequest
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 import os
 import re
 from contextlib import asynccontextmanager
@@ -50,8 +50,7 @@ app = FastAPI(
 )
 
 # --- Seguridad opcional con API Key ---
-# TODO: Mover a settings.py
-API_KEY = os.getenv("API_KEY")
+API_KEY = settings.api_key
 
 def _require_api_key(request: Request):
     if not API_KEY:
@@ -155,7 +154,7 @@ async def health_check_detailed():
     }
 
 
-def _validate_and_prepare_request(request_data: Dict[str, Any]) -> (Dict[str, Any], Any):
+def _validate_and_prepare_request(request_data: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
     """
     Función de ayuda reutilizable para validar y preparar una solicitud.
     Levanta HTTPException en caso de error.

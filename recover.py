@@ -14,6 +14,8 @@ from s3_recover import S3RecoverFiles
 from config import SatelliteConfigGOES
 from settings import settings
 
+from settings import settings
+
 # Instanciar configuración para referenciar listas válidas (bandas/productos)
 _SAT_CONFIG = SatelliteConfigGOES()
 
@@ -156,7 +158,7 @@ class RecoverFiles:
 
         self.s3 = S3RecoverFiles(self.logger, self.max_workers)
         # Limitar tamaño de listas en el reporte final para grandes volúmenes
-        self.MAX_FILES_IN_REPORT = 1000 # TODO: Mover a settings
+        self.max_files_in_report = settings.max_files_per_query if settings.max_files_per_query > 0 else 1000
 
     def procesar_consulta(self, consulta_id: str, query_dict: Dict):
         try:
@@ -422,7 +424,7 @@ class RecoverFiles:
         consulta_recuperacion = self._build_recovery_query(consulta_id, objetivos_fallidos, query_original)
 
         # Truncar listas si exceden el máximo configurado para mantener el JSON/DB manejable
-        max_n = self.MAX_FILES_IN_REPORT
+        max_n = self.max_files_in_report
         s3_list = s3_names_full if len(s3_names_full) <= max_n else s3_names_full[:max_n]
         lustre_list = lustre_names_full if len(lustre_names_full) <= max_n else lustre_names_full[:max_n]
 
