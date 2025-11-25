@@ -87,16 +87,15 @@ El script:
 Revisa si hay nuevas variables de configuración:
 
 ```bash
-# Revisar variables nuevas disponibles
-cat << 'EOF'
-# Nuevas variables disponibles (añade las que necesites):
-API_KEY=tu_clave_secreta_opcional
-S3_RETRY_ATTEMPTS=3
-S3_RETRY_BACKOFF_SECONDS=1.0
-S3_CONNECT_TIMEOUT=5
-S3_READ_TIMEOUT=30
-S3_PROGRESS_STEP=100
-EOF
+# Generar una API Key segura (recomendado)
+python3 -c "import secrets; print('API_KEY=' + secrets.token_urlsafe(32))"
+
+# Añadir al .env junto con otras variables nuevas:
+# S3_RETRY_ATTEMPTS=3
+# S3_RETRY_BACKOFF_SECONDS=1.0
+# S3_CONNECT_TIMEOUT=5
+# S3_READ_TIMEOUT=30
+# S3_PROGRESS_STEP=100
 ```
 
 ### 7. Reiniciar el Servicio
@@ -206,7 +205,25 @@ pip install -r requirements.txt
 
 ---
 
-## Paso 6: Configurar Variables de Entorno
+## Paso 6: Crear Directorios de Datos
+
+Crea los directorios necesarios para la base de datos y descargas:
+
+```bash
+# Directorio para la base de datos (recomendado)
+sudo mkdir -p /var/lib/historic_server
+sudo chown tu_usuario:tu_grupo /var/lib/historic_server
+sudo chmod 750 /var/lib/historic_server
+
+# Directorio para descargas temporales
+sudo mkdir -p /data/historic_downloads
+sudo chown tu_usuario:tu_grupo /data/historic_downloads
+sudo chmod 755 /data/historic_downloads
+```
+
+---
+
+## Paso 7: Configurar Variables de Entorno
 
 Crea un archivo `.env` a partir del ejemplo:
 
@@ -222,46 +239,31 @@ Variables importantes que debes ajustar:
 
 ```ini
 PROCESSOR_MODE=real
-DB_PATH=consultas_goes.db
-SOURCE_PATH=/depot/goes16  # Ruta a tu almacenamiento Lustre
-DOWNLOAD_PATH=/data/tmp    # Directorio para descargas
-MAX_WORKERS=8              # Ajustar según CPUs disponibles
+DB_PATH=/var/lib/historic_server/consultas_goes.db
+SOURCE_PATH=/depot/goes16
+DOWNLOAD_PATH=/data/historic_downloads
+MAX_WORKERS=8              # Ajustar según CPUs disponibles (2*cores + 1)
 S3_FALLBACK_ENABLED=True
 LUSTRE_ENABLED=True
-API_KEY=genera_una_clave_segura_aqui  # Opcional pero recomendado
 ```
 
----
-
-## Paso 7: Ejecución en Producción con Gunicorn
-
-Para ejecutar la aplicación, primero configura las variables de entorno y luego inicia Gunicorn.
+**Genera una API Key segura** (recomendado para producción):
 
 ```bash
-# 1. Activa el entorno virtual (si no lo está)
-source /opt/historic_server/venv/bin/activate
+# Genera una clave aleatoria segura
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 
-# 2. Configura las variables de entorno para el modo de producción
-export PROCESSOR_MODE="real"
-export HISTORIC_DB_PATH="/var/data/historic_api/consultas.db"
-export HISTORIC_SOURCE_PATH="/ruta/a/lustre/depot/goes16"
-export HISTORIC_DOWNLOAD_PATH="/var/data/historic_api/downloads"
-export HISTORIC_MAX_WORKERS="16" # Ajusta según los cores de tu CPU
-
-# 3. Inicia el servidor con Gunicorn
-# El flag '-w' indica el número de procesos "worker". Una buena regla es (2 * N_CORES) + 1.
-# El flag '-k' especifica la clase de worker de Uvicorn.
-# El flag '--bind' indica en qué dirección IP y puerto escuchar.
-gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 127.0.0.1:9041
+# Copia el resultado y añádelo a tu .env
+echo "API_KEY=<clave_generada>" >> .env
 ```
-
-**Nota:** Asegúrate de que los directorios para la base de datos (`/var/data/historic_api`) y las descargas existan y tengan los permisos correctos.
 
 ---
 
 ## Paso 7: Ejecución en Producción con Gunicorn
 
 El proyecto incluye un script `server.sh` que facilita el manejo del servidor. Este script ahora usa **Gunicorn con workers de Uvicorn** para mejor rendimiento y estabilidad.
+
+**Nota:** El archivo `.env` debe estar en el directorio `/opt/historic_server/` para que el script y systemd lo carguen correctamente.
 
 ### Opción A: Usar el script server.sh (Recomendado)
 
@@ -302,7 +304,7 @@ gunicorn main:app \
 
 ---
 
-## Paso 8 (Recomendado): Crear un Servicio Systemd
+## Paso 9 (Recomendado): Crear un Servicio Systemd
 
 Para que la aplicación se ejecute de forma persistente como un servicio del sistema (y se inicie automáticamente), crea un archivo de servicio `systemd`.
 
@@ -351,7 +353,7 @@ Para que la aplicación se ejecute de forma persistente como un servicio del sis
 
 ---
 
-## Paso 9 (Opcional): Configurar un Proxy Inverso con Nginx
+## Paso 10 (Opcional): Configurar un Proxy Inverso con Nginx
 
 Exponer Gunicorn directamente a internet no es seguro ni eficiente. Nginx debe actuar como un proxy inverso para manejar el tráfico entrante.
 
@@ -395,7 +397,7 @@ Exponer Gunicorn directamente a internet no es seguro ni eficiente. Nginx debe a
 
 ---
 
-## Paso 10: Verificación del Despliegue
+## Paso 11: Verificación del Despliegue
 
 ```bash
 # Verificar que el servicio está corriendo
