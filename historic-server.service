@@ -1,0 +1,19 @@
+[Unit]
+Description=Gunicorn instance to serve Historic Server API
+After=network.target
+
+[Service]
+User=lanotadm
+Group=lanotadm
+WorkingDirectory=/opt/historic_server
+# Carga las variables de entorno desde un archivo .env. La ruta es absoluta.
+EnvironmentFile=/opt/historic_server/.env
+
+# Nota: Ajusta la ruta del venv según tu instalación (venv o .venv)
+ExecStart=/opt/historic_server/.venv/bin/gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:9041
+
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

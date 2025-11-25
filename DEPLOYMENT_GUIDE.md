@@ -255,6 +255,10 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 
 # Copia el resultado y añádelo a tu .env
 echo "API_KEY=<clave_generada>" >> .env
+
+# IMPORTANTE: Configurar permisos correctos del .env
+chmod 640 .env
+chown tu_usuario:tu_grupo .env
 ```
 
 ---
@@ -327,15 +331,30 @@ Para que la aplicación se ejecute de forma persistente como un servicio del sis
     # Carga las variables de entorno desde un archivo .env. La ruta es absoluta.
     EnvironmentFile=/opt/historic_server/.env
     
-    ExecStart=/opt/historic_server/venv/bin/gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:9041
+    ExecStart=/opt/historic_server/.venv/bin/gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:9041
 
     Restart=always
+    RestartSec=5s
 
     [Install]
     WantedBy=multi-user.target
     ```
 
-3.  **Recarga, habilita e inicia el servicio:**
+3.  **Configurar permisos del archivo .env:**
+
+    ```bash
+    # El .env debe ser legible por systemd para cargar las variables
+    sudo chmod 640 /opt/historic_server/.env
+    sudo chown tu_usuario:tu_grupo /opt/historic_server/.env
+    
+    # IMPORTANTE: En sistemas con SELinux (Rocky Linux, RHEL, CentOS)
+    # Ajustar el contexto de seguridad
+    sudo semanage fcontext -a -t etc_t "/opt/historic_server/.env"
+    sudo restorecon -v /opt/historic_server/.env
+    sudo chcon -R -t bin_t /opt/historic_server/
+    ```
+
+4.  **Recarga, habilita e inicia el servicio:**
 
     ```bash
     # Recarga systemd para que reconozca el nuevo servicio
@@ -350,6 +369,24 @@ Para que la aplicación se ejecute de forma persistente como un servicio del sis
     # (Opcional) Verifica el estado del servicio
     sudo systemctl status historic-server.service
     ```
+
+**Troubleshooting - Si el servicio falla con "Permission denied":**
+
+En sistemas con SELinux (Rocky Linux, RHEL, CentOS), puede ser necesario ajustar el contexto de seguridad:
+
+```bash
+# Verificar si es problema de SELinux
+ls -Z /opt/historic_server/.env
+
+# Ajustar contexto de seguridad
+sudo semanage fcontext -a -t etc_t "/opt/historic_server/.env"
+sudo restorecon -v /opt/historic_server/.env
+sudo chcon -R -t bin_t /opt/historic_server/
+
+# Reintentar
+sudo systemctl reset-failed historic-server.service
+sudo systemctl start historic-server.service
+```
 
 ---
 

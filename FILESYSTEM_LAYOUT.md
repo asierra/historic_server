@@ -135,8 +135,9 @@ sudo journalctl -u historic-server.service -f
 chmod 750 /var/lib/historic_server
 chmod 640 /var/lib/historic_server/consultas_goes.db
 
-# Configuración (solo el usuario de la app)
-chmod 600 /opt/historic_server/.env
+# Configuración (CRÍTICO: debe ser legible por systemd)
+chmod 640 /opt/historic_server/.env
+chown tu_usuario:tu_grupo /opt/historic_server/.env
 
 # Descargas (accesible para lectura general si es necesario)
 chmod 755 /data/historic_downloads

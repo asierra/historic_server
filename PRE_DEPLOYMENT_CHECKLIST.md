@@ -84,6 +84,17 @@
 
 6. **Reiniciar servicio**
    ```bash
+   # Configurar permisos del .env (IMPORTANTE)
+   sudo chmod 640 /opt/historic_server/.env
+   sudo chown tu_usuario:tu_grupo /opt/historic_server/.env
+   
+   # SELinux: Ajustar contexto de seguridad (Rocky/RHEL/CentOS)
+   sudo semanage fcontext -a -t etc_t "/opt/historic_server/.env"
+   sudo restorecon -v /opt/historic_server/.env
+   sudo chcon -R -t bin_t /opt/historic_server/
+   
+   # Reiniciar servicio
+   sudo systemctl daemon-reload
    sudo systemctl start historic-server
    ```
 
