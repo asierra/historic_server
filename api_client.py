@@ -154,6 +154,37 @@ def monitorear_consulta(session: requests.Session, base_url: str, consulta_id: s
         print_separator("Consulta finalizada con error")
         print("No se pueden obtener resultados.")
 
+def main(base_url: str, json_file: str | None, timeout: int, poll_interval: int, resume_id: str | None, validate_only: bool):
+    """
+    Función principal para ejecutar el cliente de la API.
+    """
+    with requests.Session() as session:
+        # --- Modo: Solo Validar ---
+        if validate_only:
+            if not json_file:
+                print("❌ Error: Se requiere el archivo JSON para la validación (--validate).")
+                return
+            validar_solicitud_remota(session, base_url, json_file)
+            return
+
+        # --- Modo: Reanudar Monitoreo ---
+        if resume_id:
+            monitorear_consulta(session, base_url, resume_id, timeout, poll_interval)
+            return
+
+        # --- Modo: Nueva Consulta (por defecto) ---
+        if not json_file:
+            print("❌ Error: Se requiere un archivo JSON para iniciar una nueva consulta.")
+            print("Uso: python api_client.py <base_url> <json_file>")
+            print("O use --resume <id> para monitorear una consulta existente.")
+            return
+
+        # Iniciar y luego monitorear
+        consulta_id = iniciar_nueva_consulta(session, base_url, json_file)
+        if consulta_id:
+            monitorear_consulta(session, base_url, consulta_id, timeout, poll_interval)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cliente para la API de solicitudes históricas.")
     parser.add_argument("base_url", help="URL base de la API (ej. http://localhost:9041).")
