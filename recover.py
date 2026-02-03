@@ -21,7 +21,7 @@ _SAT_CONFIG = SatelliteConfigGOES()
 
 
 # Expresión regular para extraer el timestamp de inicio del nombre de archivo
-_FILENAME_TIMESTAMP_RE = re.compile(r'_s(\d{4})(\d{3})(\d{2})\d+.*')
+_FILENAME_TIMESTAMP_RE = re.compile(r'_s(\d{4})(\d{3})(\d{2})(\d{2}).*')
 
 
 def filter_files_by_time(archivos_nc: list, fecha_jjj: str, horarios_list: list) -> list:
@@ -33,18 +33,19 @@ def filter_files_by_time(archivos_nc: list, fecha_jjj: str, horarios_list: list)
     rangos_validos = []
     for horario_str in horarios_list:
         partes = horario_str.split('-')
-        inicio_hh = partes[0][:2]
-        fin_hh = partes[1][:2] if len(partes) > 1 else inicio_hh
-        rangos_validos.append((inicio_hh, fin_hh))
+        inicio_hm = int(partes[0].replace(':', ''))
+        fin_hm = int(partes[1].replace(':', '')) if len(partes) > 1 else inicio_hm
+        rangos_validos.append((inicio_hm, fin_hm))
 
     archivos_filtrados = []
     for archivo in archivos_nc:
         nombre = archivo.name if hasattr(archivo, "name") else archivo
         match = _FILENAME_TIMESTAMP_RE.search(nombre)
         if match:
-            anio, dia_juliano, hora = match.groups()
+            anio, dia_juliano, hora, minuto = match.groups()
             if anio + dia_juliano == fecha_jjj:
-                if any(inicio <= hora <= fin for inicio, fin in rangos_validos):
+                archivo_hm = int(hora + minuto)
+                if any(inicio <= archivo_hm <= fin for inicio, fin in rangos_validos):
                     archivos_filtrados.append(archivo)
     return archivos_filtrados
 
@@ -81,8 +82,8 @@ class LustreRecoverFiles:
             partes = horario_str.split('-')
             inicio_hhmm = partes[0].replace(':', '')
             fin_hhmm = partes[1].replace(':', '') if len(partes) > 1 else inicio_hhmm
-            inicio_ts_str = f"{fecha_jjj}{inicio_hhmm[:2]}00"
-            fin_ts_str = f"{fecha_jjj}{fin_hhmm[:2]}59"
+            inicio_ts_str = f"{fecha_jjj}{inicio_hhmm}"
+            fin_ts_str = f"{fecha_jjj}{fin_hhmm}"
             try:
                 inicio_ts = int(inicio_ts_str)
                 fin_ts = int(fin_ts_str)
