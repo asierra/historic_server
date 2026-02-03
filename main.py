@@ -28,18 +28,42 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global executor, db, processor, recover
     """
     Gestiona el ciclo de vida de la aplicación. El código antes del `yield`
     se ejecuta al iniciar, y el código después se ejecuta al apagar.
     """
-    # Código de inicio (si fuera necesario)
+    # Código de inicio
     log.info("🚀 Servidor iniciando...")
+    
+    # Inicializar componentes
+    db = ConsultasDatabase(db_path=str(DB_PATH))
+    processor = HistoricQueryProcessor()
+    
+    MAX_WORKERS = settings.max_workers
+    executor = ProcessPool(max_workers=MAX_WORKERS)
+    
+    if PROCESSOR_MODE == "real":
+        S3_FALLBACK_ENABLED = settings.s3_fallback_enabled
+        recover = RecoverFiles(
+            db=db,
+            source_data_path=str(SOURCE_DATA_PATH),
+            base_download_path=str(DOWNLOAD_PATH),
+            executor=executor,
+            s3_fallback_enabled=S3_FALLBACK_ENABLED,
+            lustre_enabled=settings.lustre_enabled,
+            file_processing_timeout_seconds=settings.file_processing_timeout_seconds
+        )
+    else:
+        recover = BackgroundSimulator(db)
+
     yield
     # Código de apagado
     log.info("⏳ Servidor recibiendo señal de apagado...")
-    log.info("   Esperando a que las tareas de fondo se completen...")
-    executor.close()
-    executor.join()
+    if executor:
+        log.info("   Esperando a que las tareas de fondo se completen...")
+        executor.close()
+        executor.join()
     log.info("✅ Todas las tareas de fondo han finalizado. Servidor apagado.")
 
 app = FastAPI(
@@ -80,30 +104,11 @@ MIN_FREE_SPACE_GB_BUFFER = settings.min_free_space_gb_buffer
 # Selección del procesador de background mediante variable de entorno
 PROCESSOR_MODE = settings.processor_mode
 
-# Crear un único ThreadPoolExecutor para toda la aplicación
-MAX_WORKERS = settings.max_workers
-executor = ProcessPool(max_workers=MAX_WORKERS)
-
-# Inicializar componentes
-db = ConsultasDatabase(db_path=str(DB_PATH))
-processor = HistoricQueryProcessor()
-
-# Instanciar el procesador de background según el modo
-if PROCESSOR_MODE == "real":
-    # Pasamos el executor compartido al constructor de RecoverFiles
-    S3_FALLBACK_ENABLED = settings.s3_fallback_enabled
-
-    recover = RecoverFiles(
-        db=db,
-        source_data_path=str(SOURCE_DATA_PATH),
-        base_download_path=str(DOWNLOAD_PATH),
-        executor=executor,
-        s3_fallback_enabled=S3_FALLBACK_ENABLED,
-        lustre_enabled=settings.lustre_enabled,
-        file_processing_timeout_seconds=settings.file_processing_timeout_seconds
-    )
-else:
-    recover = BackgroundSimulator(db)
+# Variables globales (se inicializan en lifespan)
+executor = None
+db = None
+processor = None
+recover = None
 
 
 def generar_id_consulta() -> str:

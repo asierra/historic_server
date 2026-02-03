@@ -138,7 +138,7 @@ class LustreRecoverFiles:
 
 # --- Clase principal orquestadora ---
 class RecoverFiles:
-    def __init__(self, db: ConsultasDatabase, source_data_path: str, base_download_path: str, executor, s3_fallback_enabled: Optional[bool] = None, lustre_enabled: Optional[bool] = None, max_workers: Optional[int] = None):
+    def __init__(self, db: ConsultasDatabase, source_data_path: str, base_download_path: str, executor, s3_fallback_enabled: Optional[bool] = None, lustre_enabled: Optional[bool] = None, max_workers: Optional[int] = None, file_processing_timeout_seconds: Optional[int] = None):
         self.db = db
         self.source_data_path = Path(source_data_path)
         self.base_download_path = Path(base_download_path)
@@ -147,6 +147,7 @@ class RecoverFiles:
         
         self.s3_fallback_enabled = settings.s3_fallback_enabled if s3_fallback_enabled is None else s3_fallback_enabled
         self.lustre_enabled = settings.lustre_enabled if lustre_enabled is None else lustre_enabled
+        self.FILE_PROCESSING_TIMEOUT_SECONDS = file_processing_timeout_seconds or settings.file_processing_timeout_seconds
 
         self.S3_RETRY_ATTEMPTS = settings.S3_RETRY_ATTEMPTS
         self.S3_RETRY_BACKOFF_SECONDS = settings.S3_RETRY_BACKOFF_SECONDS
