@@ -99,7 +99,8 @@ if PROCESSOR_MODE == "real":
         base_download_path=str(DOWNLOAD_PATH),
         executor=executor,
         s3_fallback_enabled=S3_FALLBACK_ENABLED,
-        lustre_enabled=settings.lustre_enabled
+        lustre_enabled=settings.lustre_enabled,
+        file_processing_timeout_seconds=settings.file_processing_timeout_seconds
     )
 else:
     recover = BackgroundSimulator(db)
