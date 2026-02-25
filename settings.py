@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings
 from pydantic import Field, ConfigDict
 from pathlib import Path
+from typing import Optional
 
 class Settings(BaseSettings):
     """
@@ -19,7 +20,7 @@ class Settings(BaseSettings):
     max_files_per_query: int = Field(0, description="Maximum estimated files per query (0 = no limit).")
     max_size_mb_per_query: int = Field(0, description="Maximum estimated size in MB per query (0 = no limit).")
     min_free_space_gb_buffer: int = Field(10, description="Safety buffer in GB to leave free on disk.")
-    api_key: str = Field(None, description="Optional API Key for securing the endpoints.")
+    api_key: Optional[str] = Field(None, description="Optional API Key for securing the endpoints.")
 
     # S3 Specific Settings
     S3_RETRY_ATTEMPTS: int = Field(3, description="Number of retry attempts for S3 operations.")

@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, Request
+from fastapi.responses import JSONResponse
 from database import ConsultasDatabase, DATABASE_PATH
 from background_simulator import BackgroundSimulator
 from recover import RecoverFiles # Importar el procesador real
@@ -302,7 +303,6 @@ async def crear_solicitud(
                 "horas": query_dict['total_horas']
             }
         }
-        from fastapi.responses import JSONResponse
         return JSONResponse(content=body, status_code=202, headers={"Location": f"/query/{consulta_id}"})
         
     except HTTPException as e:
@@ -355,11 +355,13 @@ async def reiniciar_consulta(consulta_id: str, background_tasks: BackgroundTasks
             detail=f"No se puede reiniciar una consulta en estado '{consulta['estado']}'. Solo se permiten 'procesando', 'error' o 'completado'."
         )
 
+    # Resetear estado en DB antes de encolar para que el cliente no vea estado obsoleto
+    db.actualizar_estado(consulta_id, "recibido", progreso=0, mensaje="Consulta reenviada para procesamiento")
+
     # Volver a encolar la tarea usando la query original guardada en la DB
     query_dict = consulta["query"]
     background_tasks.add_task(recover.procesar_consulta, consulta_id, query_dict)
 
-    from fastapi.responses import JSONResponse
     body = {
         "success": True,
         "message": f"La consulta '{consulta_id}' ha sido reenviada para su procesamiento."
@@ -400,12 +402,12 @@ async def obtener_consulta(
     
     # Si está completado, enriquecer la respuesta con los totales del reporte
     if consulta["estado"] == "completado" and consulta.get("resultados"):
-        resultados = consulta["resultados"]
-        fuentes = resultados.get("fuentes", {})
+        resultados_data = consulta["resultados"]
+        fuentes = resultados_data.get("fuentes", {})
         lustre_info = fuentes.get("lustre", {})
         s3_info = fuentes.get("s3", {})
         
-        resp["total_archivos"] = resultados.get("total_archivos", 0)
+        resp["total_archivos"] = resultados_data.get("total_archivos", 0)
         resp["archivos_lustre"] = lustre_info.get("total", 0)
         resp["archivos_s3"] = s3_info.get("total", 0)
 
@@ -416,8 +418,8 @@ async def obtener_consulta(
         resp["total_mb"] = None  # Por defecto es null
 
         if consulta["estado"] == "completado" and consulta.get("resultados"):
-            resultados = consulta["resultados"]
-            resp["total_mb"] = resultados.get("total_mb", 0)
+            resultados_data = consulta["resultados"]
+            resp["total_mb"] = resultados_data.get("total_mb", 0)
 
         # Derivar etapa a partir del mensaje para dar más contexto
         msg = (consulta.get("mensaje") or "").lower()
@@ -444,7 +446,6 @@ async def obtener_consulta(
         resp["etapa"] = "error_lectura_fs"
 
     # Decidir código de estado según estado de la consulta
-    from fastapi.responses import JSONResponse
     estado = consulta["estado"]
     if estado == "completado":
         return JSONResponse(content=resp, status_code=200)

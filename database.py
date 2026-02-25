@@ -4,8 +4,6 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional
 
-# Configurar logging más detallado
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 DATABASE_PATH = "consultas_goes.db"
@@ -53,9 +51,7 @@ class ConsultasDatabase:
                 return False
 
             # Verificar que query_dict sea serializable a JSON
-            print(f"🔍 Query dict recibido: {query_dict}")
             query_json = json.dumps(query_dict, ensure_ascii=False, indent=2)
-            print(f"📄 JSON generado: {query_json}")
             logger.debug("✅ Query serializada correctamente a JSON")
 
             # Extraer el usuario del campo 'creado_por', si no existe, se usará el DEFAULT de la tabla.

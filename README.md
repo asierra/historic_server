@@ -93,9 +93,58 @@ LUSTRE_ENABLED=1
 }
 ```
 
-### 1. Validar una solicitud (`POST /validate`)
+### Índice de Endpoints
 
-Verifica si una consulta es válida sin ejecutarla.
+| # | Método | Ruta | Descripción |
+|---|--------|------|-------------|
+| 1 | `GET` | `/` | Ping básico |
+| 2 | `GET` | `/health` | Verificación de salud detallada |
+| 3 | `POST` | `/validate` | Validar solicitud sin ejecutar |
+| 4 | `POST` | `/query` | Crear y encolar consulta |
+| 5 | `GET` | `/query/{consulta_id}` | Estado y progreso de una consulta |
+| 5.1 | `GET` | `/query/{consulta_id}?resultados=True` | Resultados completos al finalizar |
+| 5.2 | `POST` | `/query/{consulta_id}/restart` | Reiniciar consulta atascada o fallida |
+| 5.3 | `DELETE` | `/query/{consulta_id}` | Eliminar consulta (y opcionalmente su directorio) |
+| 6 | `GET` | `/queries` | Listar todas las consultas |
+
+---
+
+### 1. Ping básico (`GET /`)
+
+Verificación mínima de que el servidor está activo.
+
+**Respuesta:**
+```json
+{ "status": "active", "timestamp": "2024-01-15T10:00:00.000000" }
+```
+
+---
+
+### 2. Verificación de salud (`GET /health`)
+
+Verifica el estado de la base de datos, la accesibilidad al almacenamiento primario (Lustre) y reporta si Lustre y S3 están habilitados.
+
+Códigos de respuesta:
+- `200 OK` si todo está bien
+- `503 Service Unavailable` si existe algún fallo
+
+**Respuesta:**
+```json
+{
+    "status": "ok",
+    "database": "ok",
+    "storage": "ok",
+    "lustre_enabled": true,
+    "s3_enabled": true,
+    "timestamp": "2024-01-15T10:00:00.000000"
+}
+```
+
+---
+
+### 3. Validar una solicitud (`POST /validate`)
+
+Verifica si una consulta es válida sin ejecutarla. Devuelve una estimación de archivos y tamaño.
 
 **Respuesta al ejemplo 1:**
 ```json
@@ -107,13 +156,21 @@ Verifica si una consulta es válida sin ejecutarla.
 }
 ```
 
-### 2. Crear una consulta (`POST /query`)
+Códigos de error posibles:
+- `400` parámetros inválidos (satélite, dominio, nivel, fechas futuras…)
+- `413` la consulta excede el límite de archivos o tamaño configurado
+- `422` estructura JSON inválida
+- `507` espacio en disco insuficiente
 
-Envía la solicitud para ser procesada en segundo plano. Devuelve una `consulta_id`.
+---
+
+### 4. Crear una consulta (`POST /query`)
+
+Envía la solicitud para ser procesada en segundo plano. Ejecuta las mismas validaciones que `/validate` antes de encolar. Devuelve una `consulta_id`.
 
 Códigos y headers:
-- 202 Accepted
-- Headers: Location: /query/{ID}
+- `202 Accepted`
+- `Location: /query/{ID}`
 
 **Respuesta (body):**
 ```json
@@ -121,19 +178,27 @@ Códigos y headers:
     "success": true,
     "consulta_id": "aBcDeF12",
     "estado": "recibido",
-    "resumen": { ... }
+    "resumen": {
+        "satelite": "GOES-16",
+        "sensor": "ABI",
+        "nivel": "L1b",
+        "fechas": 2,
+        "horas": 3
+    }
 }
 ```
 
-### 3. Monitorear el estado (`GET /query/{consulta_id}`)
+---
+
+### 5. Estado de una consulta (`GET /query/{consulta_id}`)
+
+Consulta el estado y progreso de una solicitud en curso o finalizada.
 
 Códigos y headers:
-- 200 OK cuando estado = "completado"
-- 202 Accepted cuando estado en curso (incluye header Retry-After: 10)
-- 404 Not Found si no existe
-- 500 Internal Server Error si estado = "error"
-
-Consulta el estado y progreso de una solicitud en curso.
+- `200 OK` cuando `estado = "completado"`
+- `202 Accepted` cuando la consulta está en curso (incluye header `Retry-After: 10`)
+- `404 Not Found` si no existe
+- `500 Internal Server Error` si `estado = "error"`
 
 **Respuesta (en proceso):**
 ```json
@@ -142,6 +207,9 @@ Consulta el estado y progreso de una solicitud en curso.
     "estado": "procesando",
     "progreso": 45,
     "mensaje": "Recuperando archivo 50/112",
+    "etapa": "recuperando-local",
+    "ruta_destino": "/data/tmp/aBcDeF12",
+    "total_mb": null,
     "timestamp": "2023-11-20T15:30:00.123456"
 }
 ```
@@ -153,41 +221,106 @@ Consulta el estado y progreso de una solicitud en curso.
     "estado": "completado",
     "progreso": 100,
     "mensaje": "Recuperación: T=112, L=110, S=2",
-    "total_archivos":112,
-    "archivos_lustre":110,
-    "archivos_s3":2,
+    "etapa": "completado",
+    "ruta_destino": "/data/tmp/aBcDeF12",
+    "total_mb": 12345.67,
+    "total_archivos": 112,
+    "archivos_lustre": 110,
+    "archivos_s3": 2,
     "timestamp": "2023-11-20T15:35:10.654321"
 }
 ```
 
-### 3.1 Reiniciar una consulta encolada o atascada (`POST /query/{consulta_id}/restart`)
+Etapas derivadas del campo `etapa`:
 
-Reencola una consulta existente para que vuelva a procesarse con la misma configuración original guardada. Útil tras reinicios del servidor o fallas temporales. No vuelve a traer archivos que ya existan en la carpeta destino.
+| Valor | Descripción |
+|-------|-------------|
+| `preparando` | Configurando entorno de trabajo |
+| `recuperando-local` | Copiando archivos desde Lustre |
+| `s3-listado` | Identificando pendientes en S3 |
+| `s3-descargando` | Descargando de S3 |
+| `finalizando` | Generando reporte final |
+| `completado` | Finalizado con éxito |
+| `error` | Terminó con error |
+| `desconocida` | Estado no reconocido |
+
+---
+
+### 5.1 Resultados completos (`GET /query/{consulta_id}?resultados=True`)
+
+Una vez que el estado es `completado`, devuelve el reporte detallado con la lista completa de archivos por fuente.
+
+**Respuesta de ejemplo:**
+```json
+{
+    "consulta_id": "aBcDeF12",
+    "estado": "completado",
+    "resultados": {
+        "fuentes": {
+            "lustre": { "archivos": ["..."], "total": 110 },
+            "s3":     { "archivos": ["..."], "total": 2 }
+        },
+        "conteo_por_producto": {
+            "ACHA": 868,
+            "ADP": 436,
+            "COD": 4,
+            "LST": 76,
+            "VAA": 0
+        },
+        "conteo_por_producto_s3": {
+            "ACHA": 860,
+            "ADP": 430,
+            "COD": 4,
+            "LST": 72,
+            "VAA": 0
+        },
+        "total_archivos": 112,
+        "tamaño_total_mb": 12345.67,
+        "directorio_destino": "/data/tmp/aBcDeF12",
+        "consulta_recuperacion": { "...": "..." }
+    }
+}
+```
+
+Nota: el campo `consulta_recuperacion` contiene la consulta original filtrada a los archivos que **no** se pudieron recuperar, para facilitar reintentos.
+
+---
+
+### 5.2 Reiniciar una consulta (`POST /query/{consulta_id}/restart`)
+
+Reencola una consulta existente para que vuelva a procesarse con la misma configuración original guardada. Útil tras reinicios del servidor o fallas temporales. No vuelve a recuperar archivos que ya existan en la carpeta destino.
+
+Requiere header `X-API-Key` si la variable `API_KEY` está configurada.
 
 Códigos y headers:
-- 202 Accepted
-- Headers: Location: /query/{ID}
-- 404 si no existe
-- 400 si el estado no permite reinicio (ej. 'recibido')
+- `202 Accepted`
+- `Location: /query/{ID}`
+- `400` si el estado no permite reinicio (ej. `recibido`)
+- `404` si no existe
 
-**Respuesta (body):**
+Estados desde los que se puede reiniciar: `procesando`, `error`, `completado`.
+
+**Respuesta:**
 ```json
-{ "success": true, "message": "La consulta '<ID>' ha sido reenviada para su procesamiento." }
+{ "success": true, "message": "La consulta 'aBcDeF12' ha sido reenviada para su procesamiento." }
 ```
-Requisitos: la consulta debe existir y estar en estado `procesando`, `error` o `completado`.
 
-### 3.2 Eliminar una consulta (`DELETE /query/{consulta_id}`)
+---
 
-Elimina el registro de una consulta y opcionalmente purga el directorio de trabajo asociado.
+### 5.3 Eliminar una consulta (`DELETE /query/{consulta_id}`)
 
-Códigos y seguridad:
-- 200 OK si elimina o informa estado
-- 404 si no existe y no se indicó `purge`
-- 409 si se intenta purgar una consulta en proceso sin `force=true`
+Elimina el registro de una consulta de la base de datos y opcionalmente purga el directorio de trabajo asociado.
 
-Parámetros:
-- `purge` (bool, opcional): si es `true`, elimina el directorio `/data/tmp/<ID>` (o el definido en `DOWNLOAD_PATH`).
+Requiere header `X-API-Key` si la variable `API_KEY` está configurada.
+
+Parámetros de query:
+- `purge` (bool, opcional): si es `true`, elimina el directorio `{DOWNLOAD_PATH}/{ID}`.
 - `force` (bool, opcional): si es `true`, permite purgar aunque la consulta esté en estado `procesando`.
+
+Códigos de respuesta:
+- `200 OK` si se eliminó o se informó estado
+- `404` si no existe y no se indicó `purge`
+- `409` si se intenta purgar una consulta en proceso sin `force=true`
 
 Ejemplos:
 ```bash
@@ -207,51 +340,38 @@ Respuestas típicas:
 { "success": true, "message": "Registro de consulta no encontrado. Directorio purgado." }
 ```
 
-### 6. Obtener Resultados (`GET /query/{consulta_id}?resultados=True`)
+---
 
-Una vez que el estado es `completado`, usa este endpoint para obtener el reporte final.
+### 6. Listar consultas (`GET /queries`)
 
-**Respuesta de ejemplo:**
+Devuelve un listado resumido de consultas almacenadas en la base de datos. Útil para monitoreo.
+
+Parámetros de query:
+- `estado` (string, opcional): filtra por estado (`recibido`, `procesando`, `completado`, `error`).
+- `limite` (int, opcional, default `20`): número máximo de resultados.
+
+**Respuesta:**
 ```json
 {
-    "consulta_id": "aBcDeF12",
-    "estado": "completado",
-    "resultados": {
-        "fuentes": {
-            "lustre": { "archivos": [...], "total": 110 },
-            "s3": { "archivos": [...], "total": 2 }
+    "total": 2,
+    "consultas": [
+        {
+            "id": "aBcDeF12",
+            "estado": "completado",
+            "progreso": 100,
+            "satelite": "GOES-16",
+            "timestamp": "2023-11-20T15:30:00.123456"
         },
-        "conteo_por_producto": {
-            "ACHA": 868,
-            "ADP": 436,
-            "COD": 4,
-            "LST": 76,
-            "VAA": 0
-        },
-        "conteo_por_producto_s3": {
-            "ACHA": 860,
-            "ADP": 430,
-            "COD": 4,
-            "LST": 72,
-            "VAA": 0
-        },
-        "total_archivos": 112,
-        "tamaño_total_mb": 12345.67,
-        "directorio_destino": "/data/tmp/aBcDeF12",
-        "consulta_recuperacion": { ... }
-    }
+        {
+            "id": "xYzWwW99",
+            "estado": "procesando",
+            "progreso": 60,
+            "satelite": "GOES-16",
+            "timestamp": "2023-11-20T16:00:00.000000"
+        }
+    ]
 }
 ```
-
-Notas de estado y progreso:
-- Etapas derivadas comunes:
-    - "preparando" ("preparando entorno")
-    - "recuperando-local" (mensajes como "identificados", "procesando archivo", "recuperando archivo")
-    - "s3-listado" ("descargas s3 pendientes")
-    - "s3-descargando" ("descargando de s3" / "descarga s3")
-    - "finalizando" ("reporte final")
-    - "completado", "error" o "desconocida"
-- Mensaje final conciso al completar: "Recuperación: T=NN, L=AA, S=BB[, F=FF]"
 
 ## Arquitectura
 
