@@ -283,7 +283,7 @@ async def crear_solicitud(
         query_obj = processor.procesar_request(data, config)
         query_dict = query_obj.to_dict()
         
-        consulta_id = generar_id_consulta()
+        consulta_id = str(request_data.get('id') or '').strip() or generar_id_consulta()
         
         if not db.crear_consulta(consulta_id, query_dict):
             raise HTTPException(status_code=500, detail="Error almacenando consulta")

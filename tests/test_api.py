@@ -207,6 +207,22 @@ def test_validate_passes_when_within_limits(monkeypatch):
 
 def test_query_success(monkeypatch):
     """Prueba que una solicitud de consulta válida se crea correctamente."""
+    class _DummyQueryObj:
+        def to_dict(self):
+            return {
+                "satelite": "GOES-16",
+                "sensor": "ABI",
+                "nivel": "L2",
+                "fechas": {"2023299": ["00:00"]},
+                "total_horas": 1,
+            }
+
+    class _DummyProcessor:
+        def procesar_request(self, data, config):
+            return _DummyQueryObj()
+
+    monkeypatch.setattr(main, "processor", _DummyProcessor())
+
     # Reemplazamos la función que genera IDs para usar uno predecible
     monkeypatch.setattr("main.generar_id_consulta", lambda: "TEST_SUCCESS")
 
@@ -217,6 +233,64 @@ def test_query_success(monkeypatch):
     assert data["estado"] == "recibido"
     assert data["consulta_id"] == "TEST_SUCCESS"
     assert data["resumen"]["satelite"] == "GOES-16"
+
+
+def test_query_uses_provided_id_from_payload():
+    """Prueba que /query respeta el campo id enviado por el cliente."""
+    class _DummyQueryObj:
+        def to_dict(self):
+            return {
+                "satelite": "GOES-16",
+                "sensor": "ABI",
+                "nivel": "L2",
+                "fechas": {"2023299": ["00:00"]},
+                "total_horas": 1,
+            }
+
+    class _DummyProcessor:
+        def procesar_request(self, data, config):
+            return _DummyQueryObj()
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(main, "processor", _DummyProcessor())
+
+    provided_id = "cliente-id-123"
+    payload = dict(VALID_REQUEST)
+    payload["id"] = provided_id
+
+    response = client.post("/query", json=payload)
+    assert response.status_code == 202
+    data = response.json()
+    assert data["success"] is True
+    assert data["consulta_id"] == provided_id
+    monkeypatch.undo()
+
+
+def test_query_generates_eight_char_id_when_payload_has_no_id(monkeypatch):
+    """Prueba que /query genera un ID alfanumérico de 8 caracteres cuando no se envía id."""
+    class _DummyQueryObj:
+        def to_dict(self):
+            return {
+                "satelite": "GOES-16",
+                "sensor": "ABI",
+                "nivel": "L2",
+                "fechas": {"2023299": ["00:00"]},
+                "total_horas": 1,
+            }
+
+    class _DummyProcessor:
+        def procesar_request(self, data, config):
+            return _DummyQueryObj()
+
+    monkeypatch.setattr(main, "processor", _DummyProcessor())
+
+    payload = dict(VALID_REQUEST)
+    payload.pop("id", None)
+
+    response = client.post("/query", json=payload)
+    assert response.status_code == 202
+    consulta_id = response.json()["consulta_id"]
+    assert re.fullmatch(r"[A-Za-z0-9]{8}", consulta_id)
 
 def test_internal_date_format_is_julian(monkeypatch):
     """Verifica que el formato de fecha interno en la DB es YYYYJJJ."""
