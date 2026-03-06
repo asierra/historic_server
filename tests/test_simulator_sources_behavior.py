@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 import main
 from background_simulator import BackgroundSimulator
 from database import ConsultasDatabase
+from processors import HistoricQueryProcessor
 from settings import settings
 
 TEST_DB_PATH = "test_consultas_sources.db"
@@ -16,6 +17,7 @@ def override_db_for_tests(monkeypatch):
     """Parchea la DB y el recover con el simulador para estas pruebas."""
     test_db = ConsultasDatabase(db_path=TEST_DB_PATH)
     monkeypatch.setattr(main, "db", test_db)
+    monkeypatch.setattr(main, "processor", HistoricQueryProcessor())
 
     # Crear directorio de descarga para las pruebas y configurar la variable de entorno
     os.makedirs(TEST_DOWNLOAD_PATH, exist_ok=True)

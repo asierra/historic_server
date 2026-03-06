@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     min_free_space_gb_buffer: int = Field(10, description="Safety buffer in GB to leave free on disk.")
     api_key: Optional[str] = Field(None, description="Optional API Key for securing the endpoints.")
 
+    # S3 / GOES operational settings
+    goes19_operational_date: str = Field(
+        "2025-04-01",
+        description="Date (YYYY-MM-DD UTC) from which GOES-East maps to GOES-19 (G19) instead of GOES-16 (G16)."
+    )
+
     # S3 Specific Settings
     S3_RETRY_ATTEMPTS: int = Field(3, description="Number of retry attempts for S3 operations.")
     S3_RETRY_BACKOFF_SECONDS: float = Field(1.0, description="Backoff factor for S3 retries in seconds.")

@@ -2,7 +2,8 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, Request
 from fastapi.responses import JSONResponse
 from database import ConsultasDatabase, DATABASE_PATH
 from background_simulator import BackgroundSimulator
-from recover import RecoverFiles # Importar el procesador real
+from recover import RecoverFiles  # Importar el procesador real
+from s3_recover import _s3_circuit_breaker
 from processors import HistoricQueryProcessor
 from schemas import HistoricQueryRequest
 from datetime import datetime
@@ -157,6 +158,12 @@ async def health_check_detailed():
         "storage": storage_status,
         "lustre_enabled": lustre_status,
         "s3_enabled": s3_status,
+        "s3_circuit_breaker": {
+            "state": _s3_circuit_breaker.state,
+            "failures": _s3_circuit_breaker._failures,
+            "failure_threshold": _s3_circuit_breaker.failure_threshold,
+            "recovery_timeout_s": _s3_circuit_breaker.recovery_timeout,
+        },
         "timestamp": datetime.now().isoformat()
     }
 
@@ -286,7 +293,7 @@ async def crear_solicitud(
         consulta_id = str(request_data.get('id') or '').strip() or generar_id_consulta()
         
         if not db.crear_consulta(consulta_id, query_dict):
-            raise HTTPException(status_code=500, detail="Error almacenando consulta")
+            raise HTTPException(status_code=409, detail=f"La consulta '{consulta_id}' ya existe. Use un ID diferente o elimine la consulta existente.")
         
         # Procesar en background
         background_tasks.add_task(recover.procesar_consulta, consulta_id, query_dict)

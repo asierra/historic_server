@@ -16,6 +16,7 @@ Permitir que usuarios y sistemas externos puedan generar consultas complejas de 
 *   **Extracción Inteligente**: Es capaz de copiar archivos `.tgz` completos o extraer selectivamente su contenido (`.nc`) según los parámetros de la solicitud, optimizando el uso de disco.
 *   **Robustez y Recuperación**:
     *   Mecanismos de reintento con backoff exponencial para descargas de S3.
+    *   **Circuit breaker para S3**: después de 5 fallos consecutivos, las llamadas a S3 se rechazan instantáneamente durante 60 s en lugar de saturar el ThreadPool con timeouts. El estado (`closed`/`open`/`half-open`) es visible en `/health`.
     *   Timeouts configurables para el procesamiento de archivos, evitando procesos "zombie".
     *   Capacidad de reiniciar consultas fallidas o atascadas a través de un endpoint (`/query/{id}/restart`).
     *   Genera una `consulta_recuperacion` para los archivos que no se pudieron encontrar, facilitando reintentos manuales.
@@ -50,6 +51,7 @@ La aplicación se configura mediante variables de entorno:
 | `SIM_LOCAL_SUCCESS_RATE`        | Tasa de éxito local en modo simulador (0.0–1.0)                          | `0.8`               |
 | `SIM_S3_SUCCESS_RATE`           | Tasa de éxito S3 en modo simulador (0.0–1.0)                             | `0.5`               |
 | `SOURCE_PATH`                   | Ruta raíz del almacenamiento primario (Lustre)                          | `/depot/goes16`     |
+| `GOES19_OPERATIONAL_DATE`       | Fecha (YYYY-MM-DD UTC) desde la que GOES-East corresponde a GOES-19      | `2025-04-01`        |
 
 ### Perfiles de entorno (.env)
 ```ini
@@ -136,9 +138,20 @@ Códigos de respuesta:
     "storage": "ok",
     "lustre_enabled": true,
     "s3_enabled": true,
+    "s3_circuit_breaker": {
+        "state": "closed",
+        "failures": 0,
+        "failure_threshold": 5,
+        "recovery_timeout_s": 60
+    },
     "timestamp": "2024-01-15T10:00:00.000000"
 }
 ```
+
+Estados posibles de `s3_circuit_breaker.state`:
+- `closed` — operación normal
+- `open` — S3 fallando; llamadas rechazadas instantáneamente durante `recovery_timeout_s` segundos
+- `half-open` — periodo de prueba tras el timeout; un éxito cierra el circuito, un fallo lo vuelve a abrir
 
 ---
 
@@ -171,6 +184,7 @@ Envía la solicitud para ser procesada en segundo plano. Ejecuta las mismas vali
 Códigos y headers:
 - `202 Accepted`
 - `Location: /query/{ID}`
+- `409 Conflict` si ya existe una consulta con el mismo `consulta_id`
 
 **Respuesta (body):**
 ```json
@@ -377,7 +391,7 @@ Parámetros de query:
 
 *   **API (main.py)**: Construida con FastAPI, maneja las rutas, la validación inicial y delega el trabajo pesado a un procesador de fondo.
 *   **Procesador de Solicitudes (processors.py)**: Parsea y enriquece la solicitud del usuario, manejando la lógica de fechas, horarios y bandas.
-*   **Base de Datos (database.py)**: Utiliza SQLite para persistir el estado, progreso y resultados de cada consulta.
+*   **Base de Datos (database.py)**: Utiliza SQLite con **WAL journal mode** para persistir el estado, progreso y resultados de cada consulta. El modo WAL elimina el bloqueo entre lectores y escritores, mejorando la concurrencia. Los archivos `.db-shm` y `.db-wal` que aparecen junto a la base de datos son artefactos normales de WAL y no deben eliminarse mientras el servidor esté corriendo.
 *   **Procesador de Fondo (recover.py / s3_recover.py / background_simulator.py)**: 
     - `recover.py`: Lógica de recuperación local (Lustre) y orquestación.
     - `s3_recover.py`: Toda la lógica de descubrimiento y descarga desde S3, incluyendo filtrado avanzado por hora y minuto.

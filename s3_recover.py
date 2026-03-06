@@ -1,12 +1,72 @@
 import s3fs
 import random
 import time
+import threading
 from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime, timezone
 from pebble import ProcessPool, ThreadPool
 from concurrent.futures import as_completed
 from settings import settings
+
+
+class S3CircuitBreaker:
+    """
+    Circuit breaker thread-safe para llamadas a S3.
+
+    Estado compartido entre todos los workers del ThreadPool.
+    - closed:    operación normal, las llamadas se ejecutan.
+    - open:      S3 está fallando; las llamadas se rechazan de inmediato.
+    - half-open: tras `recovery_timeout` segundos, permite una prueba.
+
+    Si la prueba falla vuelve a 'open'; si tiene éxito vuelve a 'closed'.
+    """
+
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 60):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self._failures = 0
+        self._state = "closed"          # "closed" | "open" | "half-open"
+        self._opened_at: Optional[float] = None
+        self._lock = threading.Lock()
+
+    @property
+    def state(self) -> str:
+        with self._lock:
+            if self._state == "open":
+                if time.monotonic() - self._opened_at >= self.recovery_timeout:
+                    self._state = "half-open"
+            return self._state
+
+    @property
+    def is_open(self) -> bool:
+        return self.state == "open"
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._failures = 0
+            self._state = "closed"
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self._failures += 1
+            if self._state == "half-open":
+                # Cualquier fallo en half-open reabre el circuito inmediatamente
+                self._state = "open"
+                self._opened_at = time.monotonic()
+            elif self._failures >= self.failure_threshold and self._state == "closed":
+                self._state = "open"
+                self._opened_at = time.monotonic()
+
+    def __repr__(self) -> str:  # útil para logs
+        return f"S3CircuitBreaker(state={self._state}, failures={self._failures})"
+
+
+# Singleton a nivel de módulo — compartido entre todos los workers del ThreadPool.
+_s3_circuit_breaker = S3CircuitBreaker(
+    failure_threshold=5,
+    recovery_timeout=60,
+)
 
 
 
@@ -78,13 +138,21 @@ class S3RecoverFiles:
                             archivos_en_hora = None
                             last_exc = None
                             for attempt in range(self.retry_attempts):
+                                if _s3_circuit_breaker.is_open:
+                                    self.logger.warning(
+                                        f"S3 circuit breaker open — omitiendo ls en {s3_path_hora}"
+                                    )
+                                    archivos_en_hora = []
+                                    break
                                 try:
                                     archivos_en_hora = s3.ls(s3_path_hora)
+                                    _s3_circuit_breaker.record_success()
                                     break
                                 except FileNotFoundError:
                                     archivos_en_hora = []
                                     break
                                 except Exception as e:
+                                    _s3_circuit_breaker.record_failure()
                                     last_exc = e
                                     wait = self.retry_backoff * (2 ** attempt)
                                     time.sleep(wait)
@@ -208,6 +276,15 @@ class S3RecoverFiles:
     def _download_single_s3_objective(self, consulta_id: str, archivo_remoto_s3: str, directorio_destino: Path, s3_client: s3fs.S3FileSystem, db) -> Optional[Path]:
         last_exception = None
         for attempt in range(self.retry_attempts):
+            # Fail-fast si el circuito está abierto — no bloqueamos el worker esperando timeouts
+            if _s3_circuit_breaker.is_open:
+                self.logger.warning(
+                    f"S3 circuit breaker open — omitiendo descarga de "
+                    f"{archivo_remoto_s3} (consulta_id={consulta_id})"
+                )
+                raise RuntimeError(
+                    f"S3 circuit breaker abierto; descarga omitida: {archivo_remoto_s3}"
+                )
             try:
                 nombre_archivo_local = Path(archivo_remoto_s3).name
                 ruta_local_destino = directorio_destino / nombre_archivo_local
@@ -219,8 +296,10 @@ class S3RecoverFiles:
                     pass
                 # Reducir ruido: no actualizar DB por cada intento/archivo; el progreso se reporta en bloque.
                 s3_client.get(archivo_remoto_s3, str(ruta_local_destino))
+                _s3_circuit_breaker.record_success()
                 return ruta_local_destino
             except Exception as e:
+                _s3_circuit_breaker.record_failure()
                 last_exception = e
                 # Reducir ruido: registrar intentos a nivel debug
                 self.logger.debug(f"Intento {attempt + 1}/{self.retry_attempts} falló para {archivo_remoto_s3} (consulta_id={consulta_id}): {e}")

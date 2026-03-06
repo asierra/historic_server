@@ -9,15 +9,25 @@ logger = logging.getLogger(__name__)
 DATABASE_PATH = "consultas_goes.db"
 
 class ConsultasDatabase:
+    # Tiempo de espera (segundos) antes de lanzar OperationalError si SQLite está bloqueado.
+    # Con WAL mode el único bloqueo posible es escritor-escritor; 30s es generoso.
+    _CONNECT_TIMEOUT = 30
+
     def __init__(self, db_path: str = DATABASE_PATH):
         self.db_path = db_path
         logger.info(f"📂 Inicializando base de datos en: {db_path}")
         self._init_db()
-    
+
+    def _connect(self):
+        """Abre una conexión SQLite con timeout explícito."""
+        return sqlite3.connect(self.db_path, timeout=self._CONNECT_TIMEOUT)
+
     def _init_db(self):
         """Inicializa la base de datos con más logging"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
+                # WAL: permite lectores concurrentes sin bloquear al escritor
+                conn.execute("PRAGMA journal_mode=WAL")
                 # Habilitar foreign keys y mejor manejo de errores
                 conn.execute("PRAGMA foreign_keys = ON")
                 
@@ -57,7 +67,7 @@ class ConsultasDatabase:
             # Extraer el usuario del campo 'creado_por', si no existe, se usará el DEFAULT de la tabla.
             usuario = query_dict.get('creado_por')
             
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.execute("""
                     INSERT INTO consultas 
                     (id, estado, query, timestamp_creacion, timestamp_actualizacion, usuario)
@@ -88,7 +98,7 @@ class ConsultasDatabase:
     def _consulta_existe(self, consulta_id: str) -> bool:
         """Verifica si una consulta ya existe"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.execute(
                     "SELECT 1 FROM consultas WHERE id = ?", 
                     (consulta_id,)
@@ -101,7 +111,7 @@ class ConsultasDatabase:
     def limpiar_consultas_test(self):
         """Limpia consultas de prueba (para desarrollo)"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute("DELETE FROM consultas WHERE id LIKE 'TEST_%'")
                 conn.commit()
                 logger.info("🧹 Consultas de prueba limpiadas")
@@ -111,7 +121,7 @@ class ConsultasDatabase:
     def actualizar_estado(self, consulta_id: str, estado: str, progreso: int = None, mensaje: str = None):
         """Actualiza el estado de una consulta"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 query = """
                     UPDATE consultas 
                     SET estado = ?, timestamp_actualizacion = ?
@@ -140,7 +150,7 @@ class ConsultasDatabase:
         """Guarda los resultados de una consulta completada con un mensaje final opcional."""
         try:
             mensaje_final = mensaje or 'Recuperación completada'
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     """
                     UPDATE consultas 
@@ -164,7 +174,7 @@ class ConsultasDatabase:
     def obtener_consulta(self, consulta_id: str) -> Optional[Dict]:
         """Obtiene una consulta por ID"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute("SELECT * FROM consultas WHERE id = ?", (consulta_id,))
                 row = cursor.fetchone()
@@ -179,7 +189,7 @@ class ConsultasDatabase:
     def listar_consultas(self, estado: str = None, usuario: str = None, limite: int = 100) -> List[Dict]:
         """Lista consultas con filtros opcionales"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 query = "SELECT * FROM consultas WHERE 1=1"
                 params = []
@@ -204,7 +214,7 @@ class ConsultasDatabase:
     def eliminar_consulta(self, consulta_id: str) -> bool:
         """Elimina una consulta por ID. Devuelve True si se eliminó alguna fila."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cur = conn.execute("DELETE FROM consultas WHERE id = ?", (consulta_id,))
                 conn.commit()
                 return cur.rowcount > 0

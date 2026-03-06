@@ -152,7 +152,7 @@ class RecoverFiles:
 
         self.S3_RETRY_ATTEMPTS = settings.S3_RETRY_ATTEMPTS
         self.S3_RETRY_BACKOFF_SECONDS = settings.S3_RETRY_BACKOFF_SECONDS
-        self.GOES19_OPERATIONAL_DATE = datetime(2025, 4, 1, tzinfo=timezone.utc)
+        self.GOES19_OPERATIONAL_DATE = datetime.fromisoformat(settings.goes19_operational_date).replace(tzinfo=timezone.utc)
         self.lustre = LustreRecoverFiles(source_data_path, self.logger)
 
         # Inicializa self.max_workers ANTES de usarla
