@@ -10,13 +10,13 @@ from datetime import datetime
 from typing import Dict, Any, Tuple
 import os
 import re
+import uuid
 from contextlib import asynccontextmanager
 import logging
-from logging.handlers import RotatingFileHandler
+import structlog
 from pydantic import ValidationError
 from config import SatelliteConfigGOES
 import uvicorn
-import os
 import shutil
 import secrets
 import string
@@ -74,6 +74,24 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+
+@app.middleware("http")
+async def correlation_id_middleware(request: Request, call_next):
+    """
+    Middleware de trazabilidad distribuida.
+    Lee el header X-Request-ID entrante o genera un UUID nuevo,
+    lo inyecta en el contexto de structlog y lo propaga en la respuesta.
+    """
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    structlog.contextvars.bind_contextvars(request_id=request_id)
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        structlog.contextvars.unbind_contextvars("request_id")
+
 
 # --- Seguridad opcional con API Key ---
 API_KEY = settings.api_key
