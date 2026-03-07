@@ -286,8 +286,13 @@ class RecoverFiles:
                 s3_recuperados, objetivos_fallidos_s3 = self.s3.download_files(
                     consulta_id, objetivos_finales_s3, directorio_destino, self.db
                 )
-                # Combinar fallas locales y de S3
-                objetivos_fallidos_final = list(objetivos_fallidos_local) + list(objetivos_fallidos_s3)
+                # Excluir de las fallas locales los archivos que S3 sí recuperó,
+                # para no contarlos como fallidos en el mensaje final.
+                s3_recuperados_nombres = {f.name for f in s3_recuperados}
+                objetivos_fallidos_final = (
+                    [f for f in objetivos_fallidos_local if f.name not in s3_recuperados_nombres]
+                    + list(objetivos_fallidos_s3)
+                )
             else:
                 s3_recuperados = []
                 objetivos_fallidos_final = objetivos_fallidos_local
