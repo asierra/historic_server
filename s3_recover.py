@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime, timezone
 from pebble import ProcessPool, ThreadPool
+from pebble import TimeoutError
 from concurrent.futures import as_completed
 from settings import settings
 
@@ -234,9 +235,11 @@ class S3RecoverFiles:
             self.logger.info(f"S3: no hay descargas pendientes; {completados}/{total_obj} ya presentes (consulta_id={consulta_id})")
             return list(s3_recuperados_set), objetivos_aun_fallidos
 
+        # Timeout por tarea = S3_READ_TIMEOUT × reintentos + holgura de backoff
+        task_timeout = self.retry_attempts * (settings.S3_READ_TIMEOUT + self.retry_backoff * (2 ** self.retry_attempts)) + 10
         with ThreadPool(max_workers=self.max_workers) as pool:
             future_to_s3_path = {
-                pool.schedule(self._download_single_s3_objective, args=(consulta_id, s3_path, directorio_destino, s3, db)): s3_path
+                pool.schedule(self._download_single_s3_objective, args=(consulta_id, s3_path, directorio_destino, s3, db), timeout=task_timeout): s3_path
                 for s3_path in pendientes
             }
             for future in as_completed(list(future_to_s3_path.keys())):
@@ -246,6 +249,12 @@ class S3RecoverFiles:
                     if resultado:
                         s3_recuperados_set.add(resultado)
                         ok_count += 1
+                except TimeoutError:
+                    self.logger.warning(
+                        f"S3 timeout ({task_timeout:.0f}s) excedido para {Path(s3_path).name} (consulta_id={consulta_id})"
+                    )
+                    objetivos_aun_fallidos.append(Path(s3_path).name)
+                    fail_count += 1
                 except Exception:
                     objetivos_aun_fallidos.append(Path(s3_path).name)
                     fail_count += 1

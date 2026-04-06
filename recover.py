@@ -331,7 +331,9 @@ class RecoverFiles:
         for archivo_fallido in objetivos_fallidos:
             try:
                 # 1. Extraer el timestamp YYYYJJJHHMM del nombre del archivo.
-                ts_str = archivo_fallido.name.split('-s')[1].split('.')[0][:11]
+                # archivo_fallido puede ser Path (Lustre) o str (S3 fallidos)
+                nombre_fallido = archivo_fallido.name if hasattr(archivo_fallido, 'name') else archivo_fallido
+                ts_str = nombre_fallido.split('-s')[1].split('.')[0][:11]
                 fecha_fallida_dt = datetime.strptime(ts_str, '%Y%j%H%M')
                 fecha_fallida_ymd = fecha_fallida_dt.strftime('%Y%m%d')
 
