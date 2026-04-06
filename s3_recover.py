@@ -6,8 +6,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime, timezone
 from pebble import ProcessPool, ThreadPool
-from pebble import TimeoutError
-from concurrent.futures import as_completed
+from concurrent.futures import TimeoutError, as_completed
 from settings import settings
 
 
