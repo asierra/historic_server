@@ -1,4 +1,5 @@
 import logging
+import os
 import shutil
 import re
 import tarfile
@@ -298,7 +299,9 @@ class RecoverFiles:
                 objetivos_fallidos_final = objetivos_fallidos_local
 
             # 6. Generar reporte final
-            all_files_in_destination = [f for f in directorio_destino.iterdir() if f.is_file()]
+            # Usar scandir para obtener nombre + tamaño en una sola pasada del OS,
+            # evitando stat() individual por cada archivo (crítico con cientos de miles).
+            dest_entries = [e for e in os.scandir(directorio_destino) if e.is_file(follow_symlinks=False)]
             self.db.actualizar_estado(consulta_id, "procesando", 95, "Generando reporte final")
             
             # Obtener la consulta para acceder al timestamp de creación
@@ -306,7 +309,7 @@ class RecoverFiles:
             timestamp_creacion = consulta_db.get("timestamp_creacion") if consulta_db else datetime.now().isoformat()
 
             resultados_finales = self._generar_reporte_final(
-                consulta_id, all_files_in_destination, s3_recuperados, directorio_destino, objetivos_fallidos_final, query_dict, timestamp_creacion
+                consulta_id, dest_entries, s3_recuperados, directorio_destino, objetivos_fallidos_final, query_dict, timestamp_creacion
             )
             # Mensaje final breve y legible
             total_recuperados = resultados_finales.get("total_archivos", 0)
@@ -371,43 +374,29 @@ class RecoverFiles:
         
         return None
 
-    def _generar_reporte_final(self, consulta_id: str, all_files_in_destination: List[Path], s3_recuperados: List[Path], directorio_destino: Path, objetivos_fallidos: List[Path], query_original: Dict, timestamp_creacion_iso: str) -> Dict:
+    def _generar_reporte_final(self, consulta_id: str, dest_entries: list, s3_recuperados: List[Path], directorio_destino: Path, objetivos_fallidos: List[Path], query_original: Dict, timestamp_creacion_iso: str) -> Dict:
         """Genera el diccionario de resultados finales."""
         # --- Cálculo de la duración total del procesamiento ---
         timestamp_finalizacion = datetime.now()
         duracion_str = "N/A"
         try:
-            # Convertir ambos timestamps a objetos datetime
             ts_inicio = datetime.fromisoformat(timestamp_creacion_iso)
-            # Calcular la diferencia
             delta = timestamp_finalizacion - ts_inicio
-            duracion_str = str(delta).split('.')[0] # Formato HH:MM:SS
+            duracion_str = str(delta).split('.')[0]
         except (ValueError, TypeError):
             self.logger.warning(f"No se pudo calcular la duración para la consulta {consulta_id} debido a un timestamp inválido.")
 
-        # Optimizar: usar comparación por nombre con set para evitar O(n^2)
-        s3_names_full = [p.name for p in s3_recuperados]
-        s3_names_set = set(s3_names_full)
-        lustre_names_full = [p.name for p in all_files_in_destination if p.name not in s3_names_set]
-        todos_los_archivos = all_files_in_destination
-        # Cálculo de tamaño total (puede ser costoso con cientos de miles de archivos)
-        total_bytes = sum(f.stat().st_size for f in todos_los_archivos if f.is_file())
-        tamaño_mb = round(total_bytes / (1024 * 1024), 2)
-
-        # Conteo por producto (basado en el nombre del archivo OR_/CG_ABI-L2-<PROD><DOM>-M6...)
         from collections import defaultdict as _dd
+
         def _extraer_producto_base(nombre: str) -> str:
             try:
-                # localizar '-L2-' y '-M'
                 i = nombre.index('-L2-') + 4
                 j = nombre.index('-M', i)
-                seg = nombre[i:j]  # puede venir como 'ACMC', 'CMIPC', 'VAAC', etc.
-                # Normalizar: quitar sufijo de dominio (C/F/M1/M2)
+                seg = nombre[i:j]
                 if seg.endswith('C') or seg.endswith('F'):
                     seg = seg[:-1]
                 elif seg.endswith('M1') or seg.endswith('M2'):
                     seg = seg[:-2]
-                # Mapear alias a base solicitada
                 alias = {
                     'CODD': 'COD', 'CODN': 'COD', 'COD': 'COD',
                     'CPSD': 'CPS', 'CPSN': 'CPS', 'CPS': 'CPS',
@@ -417,17 +406,30 @@ class RecoverFiles:
             except Exception:
                 return 'UNKNOWN'
 
+        # Conjunto de nombres S3 para clasificación rápida O(1)
+        s3_names_set = {p.name for p in s3_recuperados}
+        s3_names_full = [p.name for p in s3_recuperados]
+
+        # Recorrido único: tamaño total + conteos por producto en una sola pasada
+        # DirEntry.stat() usa el resultado cacheado del scandir — sin syscalls extra
+        total_bytes = 0
+        lustre_names_full = []
         conteo_total_por_producto = _dd(int)
         conteo_s3_por_producto = _dd(int)
 
-        for p in all_files_in_destination:
-            prod = _extraer_producto_base(p.name)
+        for entry in dest_entries:
+            nombre = entry.name
+            total_bytes += entry.stat(follow_symlinks=False).st_size
+            prod = _extraer_producto_base(nombre)
             if prod != 'UNKNOWN':
                 conteo_total_por_producto[prod] += 1
-        for p in s3_recuperados:
-            prod = _extraer_producto_base(p.name)
-            if prod != 'UNKNOWN':
-                conteo_s3_por_producto[prod] += 1
+            if nombre in s3_names_set:
+                if prod != 'UNKNOWN':
+                    conteo_s3_por_producto[prod] += 1
+            else:
+                lustre_names_full.append(nombre)
+
+        tamaño_mb = round(total_bytes / (1024 * 1024), 2)
 
         # Construir la consulta de recuperación usando el método refactorizado.
         consulta_recuperacion = self._build_recovery_query(consulta_id, objetivos_fallidos, query_original)
@@ -450,7 +452,7 @@ class RecoverFiles:
             },
             "conteo_por_producto": dict(sorted(conteo_total_por_producto.items())),
             "conteo_por_producto_s3": dict(sorted(conteo_s3_por_producto.items())),
-            "total_archivos": len(todos_los_archivos),
+            "total_archivos": len(dest_entries),
             "total_mb": tamaño_mb,
             "ruta_destino": str(directorio_destino),
             "timestamp_procesamiento": datetime.now().isoformat(),
