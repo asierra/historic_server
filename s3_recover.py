@@ -238,7 +238,7 @@ class S3RecoverFiles:
         task_timeout = self.retry_attempts * (settings.S3_READ_TIMEOUT + self.retry_backoff * (2 ** self.retry_attempts)) + 10
         with ThreadPool(max_workers=self.max_workers) as pool:
             future_to_s3_path = {
-                pool.schedule(self._download_single_s3_objective, args=(consulta_id, s3_path, directorio_destino, s3, db), timeout=task_timeout): s3_path
+                pool.schedule(self._download_single_s3_objective, args=(consulta_id, s3_path, directorio_destino, s3, db)): s3_path
                 for s3_path in pendientes
             }
             for future in as_completed(list(future_to_s3_path.keys())):
