@@ -43,6 +43,41 @@ There's no linter configured. `SECURITY.md` / `PRE_DEPLOYMENT_CHECKLIST.md` / `D
 
 `consulta_id` is an 8-char random ID (`generar_id_consulta()`, `secrets.choice`), used as the SQLite PK — the same ID the caller (`historic_query`) generates/tracks on its side, sent as `id` in the request body or auto-generated here if absent.
 
+### Query states and the in-flight lock
+`estado` is this server's own vocabulary — `recibido` (accepted and queued) → `procesando` (pipeline
+working) → `completado` / `error`. **These are not `historic_query`'s states**: Django never stores
+`recibido`/`procesando`, it collapses both into its own `en_proceso` via `translate_api_estado()`.
+Both map to HTTP 202 + `Retry-After` in `GET /query/{id}`, so they're indistinguishable to callers.
+
+Two module-level tuples in `main.py` are the single source of truth — use them instead of hardcoding
+state lists: `ESTADOS_EN_VUELO` (`recibido`, `procesando`) and `ESTADOS_REINICIABLES` (those plus
+`error`, `completado`).
+
+**Background tasks live in memory.** FastAPI's `BackgroundTasks` are lost whenever the process dies,
+so a query stays frozen in whatever state it had, forever — there is no startup rescue. This is not
+hypothetical: `GkpH6xne` sat at 89% for 29h in Aug-2026 because `historic-server` was restarted
+mid-download. Two consequences are wired into the code and should not be "simplified" away:
+- `POST /query/{id}/restart` accepts `recibido` precisely because that's where a never-started task
+  lands. It's the endpoint's whole reason to exist.
+- `DELETE /query/{id}?purge=true` returns **409** for anything in `ESTADOS_EN_VUELO` unless
+  `force=true`, since the task may start at any moment and recreate the directory just deleted.
+  `historic_query`'s admin reject button always sends `force=true` for this reason.
+
+`gunicorn -w 4` means workers share no memory, so two restart requests land on different processes
+and each queues its own task — this actually happened, with two workers downloading the same 2380
+files in parallel. `database.reclamar_para_reproceso()` is the lock: one conditional `UPDATE` that
+both resets the state and claims the query, so only one caller can see `rowcount == 1`. The lock
+signal is `timestamp_actualizacion`, which the pipeline already refreshes on every advance — a
+recent heartbeat means someone is really working, a stale one (older than `LATIDO_MAXIMO_S`, 900s)
+means the task died. `error`/`completado` are always claimable; they have no work in flight.
+
+### Open work
+Tracked in `../historic_query/pendientes.md` §0-ter (the operational log lives in that repo). For
+this one: a startup rescue in `lifespan` for queries orphaned by a restart (now feasible — the lock
+above is the missing piece it needed), no test coverage for the 413 quota rejection, and a timing
+flake in `tests/test_simulator_sources_behavior.py` (four 20s waits against a simulator that takes
+~9s per query).
+
 ### Storage backend (the pending sqlite→postgres migration)
 `database.py`'s `ConsultasDatabase` is a hand-written SQLite wrapper (no ORM) using **WAL journal mode** for reader/writer concurrency, with a single `consultas` table (id, estado, query JSON blob, resultados JSON blob, progreso, mensaje, timestamps, usuario). All queries are raw `sqlite3` calls with manual `try/except` + logging per method — there's no connection pooling or migrations framework; `migrate_db.py` is a standalone imperative script that inspects `PRAGMA table_info` and `ALTER TABLE`s as needed, run manually (not on app startup). A move to Postgres would need to replace this whole module (and `migrate_db.py`) since nothing here is DB-agnostic (raw SQL strings, sqlite-specific `PRAGMA` calls, file-path-based `DB_PATH` config). Given the low write/read volume (single client today), this has been deprioritized — revisit if concurrent multi-client access becomes real.
 
@@ -62,4 +97,4 @@ Band requirements depend on level/product (`main.py:_validate_and_prepare_reques
 `structlog` via `logging_config.py`: human-readable console output in an interactive terminal, JSON in production (systemd/containers). `consulta_id` and `request_id` (from the `X-Request-ID` header, bound in the `correlation_id_middleware` in `main.py`) are bound into `structlog.contextvars` so every log line during a request/query's lifecycle carries them automatically — don't manually thread IDs through function signatures for logging purposes, use `structlog.get_logger(__name__)` and bind/log with `key=value` pairs (see README's "Sistema de Logging" section for the exact convention, including why f-strings in log messages are discouraged here).
 
 ### Filesystem layout in production
-Code, DB, and downloads are intentionally on separate paths (`/opt/historic_server` code, `/var/lib/historic_server` DB, `/data/historic_downloads` or similar for per-query working dirs) — see `FILESYSTEM_LAYOUT.md` for the full rationale and backup strategy (`sqlite3 .backup` + gzip + 30-day retention cron). `DOWNLOAD_PATH/{consulta_id}` is where each query's recovered files land; `DELETE /query/{id}?purge=true` removes it (path-traversal-guarded in `main.py`).
+Code, DB, and downloads are intentionally on separate paths (`/opt/historic_server` code, `/var/lib/historic_server` DB, `/data/historic_downloads` or similar for per-query working dirs) — see `FILESYSTEM_LAYOUT.md` for the full rationale and backup strategy (`sqlite3 .backup` + gzip + 30-day retention cron). `DOWNLOAD_PATH/{consulta_id}` is where each query's recovered files land; `DELETE /query/{id}?purge=true` removes it (path-traversal-guarded in `main.py`; needs `force=true` if the query still has work in flight — see the states section).
