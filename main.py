@@ -121,6 +121,20 @@ MAX_FILES_PER_QUERY = settings.max_files_per_query
 MAX_SIZE_MB_PER_QUERY = settings.max_size_mb_per_query
 MIN_FREE_SPACE_GB_BUFFER = settings.min_free_space_gb_buffer
 
+# --- Estados con trabajo en vuelo ---
+# 'recibido' = aceptada y encolada; 'procesando' = el pipeline ya está trabajando.
+# La tarea de fondo vive en memoria (BackgroundTasks), así que una consulta puede
+# quedarse en 'recibido' si el proceso muere antes de que la tarea arranque: por eso
+# ambos estados son reiniciables y ambos protegen el directorio frente a un purge.
+ESTADOS_EN_VUELO = ("recibido", "procesando")
+ESTADOS_REINICIABLES = ESTADOS_EN_VUELO + ("error", "completado")
+
+# Cuánto puede pasar sin que el pipeline refresque `timestamp_actualizacion` antes
+# de dar por muerta la tarea y permitir reclamar la consulta. Holgado a propósito:
+# las fases de listado (Lustre, S3) tardan en producir el primer avance, y matar
+# trabajo real es peor que esperar de más para reintentar.
+LATIDO_MAXIMO_S = 900
+
 # Selección del procesador de background mediante variable de entorno
 PROCESSOR_MODE = settings.processor_mode
 
@@ -373,15 +387,33 @@ async def reiniciar_consulta(consulta_id: str, background_tasks: BackgroundTasks
     if not consulta:
         raise HTTPException(status_code=404, detail="Consulta no encontrada.")
 
-    # Permitir reiniciar consultas en proceso, con error, o completadas (para forzar reprocesamiento).
-    if consulta["estado"] not in ["procesando", "error", "completado"]:
+    # Permitir reiniciar consultas encoladas, en proceso, con error, o completadas
+    # (estas últimas para forzar reprocesamiento). 'recibido' entra aquí a propósito:
+    # es justo el estado en que queda una consulta cuya tarea de fondo nunca arrancó,
+    # que es el caso de uso para el que existe este endpoint.
+    if consulta["estado"] not in ESTADOS_REINICIABLES:
         raise HTTPException(
             status_code=400,
-            detail=f"No se puede reiniciar una consulta en estado '{consulta['estado']}'. Solo se permiten 'procesando', 'error' o 'completado'."
+            detail=(
+                f"No se puede reiniciar una consulta en estado '{consulta['estado']}'. "
+                f"Solo se permiten {', '.join(repr(e) for e in ESTADOS_REINICIABLES)}."
+            )
         )
 
-    # Resetear estado en DB antes de encolar para que el cliente no vea estado obsoleto
-    db.actualizar_estado(consulta_id, "recibido", progreso=0, mensaje="Consulta reenviada para procesamiento")
+    # Reclamar la consulta antes de encolar nada. El UPDATE condicional resetea el
+    # estado —para que el cliente no vea uno obsoleto— y a la vez hace de cerrojo
+    # entre los 4 workers de gunicorn, que no comparten memoria: sin él, dos
+    # peticiones simultáneas encolan dos tareas sobre el mismo consulta_id y
+    # descargan cada archivo por duplicado.
+    if not db.reclamar_para_reproceso(consulta_id, ESTADOS_EN_VUELO, LATIDO_MAXIMO_S):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"La consulta '{consulta_id}' ya se está procesando (hubo actividad en "
+                f"los últimos {LATIDO_MAXIMO_S} s). Espera a que termine o falle antes "
+                "de reiniciarla."
+            )
+        )
 
     # Volver a encolar la tarea usando la query original guardada en la DB
     query_dict = consulta["query"]
@@ -513,7 +545,7 @@ async def eliminar_consulta(request: Request, consulta_id: str, purge: bool = Fa
     """
     Elimina una consulta de la base de datos. Opcionalmente purga el directorio de trabajo.
     - purge=true para eliminar / purgar el directorio de archivos asociado a la consulta.
-    - force=true para permitir purge aunque la consulta esté en estado 'procesando'.
+    - force=true para permitir purge aunque la consulta esté en estado 'recibido' o 'procesando'.
     """
     _require_api_key(request)
 
@@ -521,8 +553,10 @@ async def eliminar_consulta(request: Request, consulta_id: str, purge: bool = Fa
 
     # Purga opcional del directorio asociado a la consulta
     if purge:
-        # Bloquear purga si está procesando y no se forzó
-        if consulta and (consulta.get("estado") == "procesando") and not force:
+        # Bloquear purga si hay trabajo en vuelo y no se forzó. Incluye 'recibido':
+        # la tarea puede arrancar en cualquier momento y recrear el directorio que
+        # acabamos de borrar, dejando archivos huérfanos sin registro en la DB.
+        if consulta and (consulta.get("estado") in ESTADOS_EN_VUELO) and not force:
             raise HTTPException(
                 status_code=409,
                 detail="La consulta está en proceso; use force=true para purgar de todas formas."

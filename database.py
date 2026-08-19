@@ -1,7 +1,7 @@
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -186,6 +186,56 @@ class ConsultasDatabase:
             logging.error(f"Error obteniendo consulta: {e}")
             return None
     
+    def reclamar_para_reproceso(
+        self,
+        consulta_id: str,
+        estados_en_vuelo: tuple,
+        latido_maximo_s: int,
+        mensaje: str = "Consulta reenviada para procesamiento",
+    ) -> bool:
+        """Reclama una consulta para reprocesarla, en una sola operación atómica.
+
+        Devuelve True si esta llamada se quedó con la consulta, y False si otra
+        ya la tiene en vuelo. Sirve de cerrojo entre los workers de gunicorn, que
+        no comparten memoria: sin esto, dos peticiones repartidas a workers
+        distintos encolan cada una su propia tarea sobre el mismo consulta_id y
+        acaban descargando los mismos archivos por duplicado, pisándose entre sí.
+
+        El cerrojo es el propio `timestamp_actualizacion`: el pipeline lo refresca
+        con cada avance, así que un latido reciente significa que hay alguien
+        trabajando de verdad. Si está más viejo que `latido_maximo_s`, la tarea
+        murió (típicamente porque se reinició el servicio, que se lleva por
+        delante los BackgroundTasks) y la consulta puede reclamarse.
+
+        Los estados fuera de `estados_en_vuelo` (error, completado) no tienen
+        trabajo en curso: se reclaman siempre, sin mirar el latido.
+        """
+        try:
+            ahora = datetime.now()
+            umbral = (ahora - timedelta(seconds=latido_maximo_s)).isoformat()
+            marcadores = ",".join("?" for _ in estados_en_vuelo)
+            with self._connect() as conn:
+                # UPDATE condicional: SQLite lo resuelve en una transacción, así que
+                # de dos llamadas simultáneas solo una puede ver rowcount == 1.
+                cursor = conn.execute(
+                    f"""
+                    UPDATE consultas
+                       SET estado = 'recibido',
+                           progreso = 0,
+                           mensaje = ?,
+                           timestamp_actualizacion = ?
+                     WHERE id = ?
+                       AND (estado NOT IN ({marcadores})
+                            OR timestamp_actualizacion < ?)
+                    """,
+                    (mensaje, ahora.isoformat(), consulta_id, *estados_en_vuelo, umbral),
+                )
+                conn.commit()
+                return cursor.rowcount == 1
+        except Exception as e:
+            logging.error(f"Error reclamando consulta {consulta_id} para reproceso: {e}")
+            return False
+
     def listar_consultas(self, estado: str = None, usuario: str = None, limite: int = 100) -> List[Dict]:
         """Lista consultas con filtros opcionales"""
         try:

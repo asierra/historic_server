@@ -4,6 +4,7 @@ gunicorn
 pebble
 s3fs
 pytest
+pytest-env
 requests
 httpx
 pydantic-settings

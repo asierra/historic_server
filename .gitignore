@@ -206,3 +206,12 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 *.db
+
+# Artefactos de las pruebas
+# Los tests escriben en la raíz del repo: directorios de descarga con nombre
+# igual al consulta_id de prueba, y los sidecar WAL de SQLite (el .db ya está
+# cubierto arriba, pero -shm/-wal no).
+/test_downloads/
+/TEST_*/
+*.db-shm
+*.db-wal

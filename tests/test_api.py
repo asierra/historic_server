@@ -8,7 +8,9 @@ import re
 from background_simulator import BackgroundSimulator
 from database import ConsultasDatabase
 import os
+from datetime import datetime, timedelta
 from recover import RecoverFiles  # Importar el procesador real para la prueba de integración
+from processors import HistoricQueryProcessor
 from settings import settings
 
 # --- Configuración de la Base de Datos de Prueba ---
@@ -34,9 +36,14 @@ def override_db_for_tests(monkeypatch):
     monkeypatch.setattr(main, "DOWNLOAD_PATH", TEST_DOWNLOAD_PATH)
 
     
-    # 2. Reemplazar los objetos globales en main.py
+    # 2. Reemplazar los objetos globales en main.py.
+    # `processor` incluido: normalmente lo construye el lifespan, que TestClient
+    # solo dispara si se usa como context manager. Como el cliente se crea a nivel
+    # de módulo, sin `with`, sin esto queda en None y /query responde 400
+    # ("'NoneType' object has no attribute 'procesar_request'").
     monkeypatch.setattr(main, "db", test_db)
     monkeypatch.setattr(main, "recover", BackgroundSimulator(test_db))
+    monkeypatch.setattr(main, "processor", HistoricQueryProcessor())
     # 3. Desactivar el apagado del executor para evitar errores en las pruebas
     
     try:
@@ -596,6 +603,13 @@ def test_complex_query_does_not_get_stuck(monkeypatch):
     mock_disk_usage = disk_usage_result(total=1000, used=500, free=free_space_bytes)
     monkeypatch.setattr(shutil, "disk_usage", lambda path: mock_disk_usage)
 
+    # Desactivar las cuotas por consulta (0 = sin límite): esta solicitud estima
+    # ~36 GB y el límite de despliegue es 20 GB, así que se rechazaría con 413
+    # antes de llegar a procesarse. Lo que este test verifica es que el pipeline
+    # no se atore con muchas fechas y rangos, no el rechazo por cuota.
+    monkeypatch.setattr(main, "MAX_SIZE_MB_PER_QUERY", 0)
+    monkeypatch.setattr(main, "MAX_FILES_PER_QUERY", 0)
+
     # 1. Crear la consulta
     create_response = client.post("/query", json=complex_request)
     assert create_response.status_code == 202
@@ -691,3 +705,212 @@ def test_l2_cmip_without_bandas_expands_to_all(monkeypatch):
             bands.add(m.group(1))
     # Debe haber 16 bandas (01..16)
     assert bands == {f"{i:02d}" for i in range(1, 17)}, f"Bandas detectadas: {sorted(bands)}"
+
+# ---------------------------------------------------------------------------
+# Estados con trabajo en vuelo: 'recibido' y 'procesando'
+#
+# Una consulta queda en 'recibido' entre el INSERT y el arranque de la tarea de
+# fondo. Como BackgroundTasks vive en memoria, ahí se queda para siempre si el
+# proceso muere en esa ventana: por eso 'recibido' debe ser reiniciable y debe
+# proteger el directorio frente a un purge sin force.
+# ---------------------------------------------------------------------------
+
+QUERY_DICT_MINIMO = {
+    "satelite": "GOES-16",
+    "sensor": "ABI",
+    "nivel": "L2",
+    "fechas": {"2023299": ["00:00"]},
+    "total_horas": 1,
+}
+
+
+@pytest.fixture
+def recover_espia(monkeypatch):
+    """Sustituye el procesador de fondo por un doble que solo registra llamadas."""
+    class _RecoverEspia:
+        def __init__(self):
+            self.llamadas = []
+
+        def procesar_consulta(self, consulta_id, query_dict):
+            self.llamadas.append(consulta_id)
+
+    espia = _RecoverEspia()
+    monkeypatch.setattr(main, "recover", espia)
+    return espia
+
+
+def _crear_consulta_en_estado(consulta_id, estado):
+    """Inserta una consulta directamente en la DB de prueba con el estado dado."""
+    assert main.db.crear_consulta(consulta_id, QUERY_DICT_MINIMO)
+    if estado != "recibido":
+        main.db.actualizar_estado(consulta_id, estado, 0, "estado de prueba")
+
+
+def test_restart_acepta_recibido(recover_espia):
+    """Una consulta encolada cuya tarea nunca arrancó debe poder reiniciarse.
+
+    Es el caso de uso exacto del endpoint: el servidor se reinició y la tarea
+    en memoria se perdió, dejando la consulta congelada en 'recibido'.
+    """
+    _crear_consulta_en_estado("TEST_RESTART_RECIBIDO", "recibido")
+    # Sin latido reciente: la tarea murió hace rato, que es el escenario real.
+    _envejecer_latido("TEST_RESTART_RECIBIDO", main.LATIDO_MAXIMO_S + 60)
+
+    response = client.post("/query/TEST_RESTART_RECIBIDO/restart")
+
+    assert response.status_code == 202
+    assert response.json()["success"] is True
+    assert recover_espia.llamadas == ["TEST_RESTART_RECIBIDO"]
+
+
+def test_restart_acepta_procesando_error_y_completado(recover_espia):
+    """Los tres estados que ya se aceptaban siguen aceptándose."""
+    for i, estado in enumerate(("procesando", "error", "completado")):
+        consulta_id = f"TEST_RESTART_{estado.upper()}"
+        _crear_consulta_en_estado(consulta_id, estado)
+        # 'procesando' necesita latido viejo para no chocar con el cerrojo;
+        # a 'error' y 'completado' no les aplica.
+        _envejecer_latido(consulta_id, main.LATIDO_MAXIMO_S + 60)
+
+        response = client.post(f"/query/{consulta_id}/restart")
+
+        assert response.status_code == 202, f"estado {estado} rechazado"
+        assert recover_espia.llamadas[i] == consulta_id
+
+
+def test_restart_rechaza_estado_no_reiniciable(recover_espia):
+    """Un estado fuera de la lista sigue devolviendo 400 y no encola nada."""
+    _crear_consulta_en_estado("TEST_RESTART_RARO", "estado_desconocido")
+
+    response = client.post("/query/TEST_RESTART_RARO/restart")
+
+    assert response.status_code == 400
+    assert "estado_desconocido" in response.json()["detail"]
+    assert recover_espia.llamadas == []
+
+
+def test_purge_bloqueado_en_recibido():
+    """Purgar una consulta encolada sin force debe dar 409.
+
+    Sin esto hay una carrera: se borra el directorio y la tarea arranca justo
+    después, lo recrea y lo llena, pero el registro en DB ya no existe.
+    """
+    _crear_consulta_en_estado("TEST_PURGE_RECIBIDO", "recibido")
+
+    response = client.delete("/query/TEST_PURGE_RECIBIDO?purge=true")
+
+    assert response.status_code == 409
+    # El registro sigue en la DB: no se borró nada.
+    assert main.db.obtener_consulta("TEST_PURGE_RECIBIDO") is not None
+
+
+def test_purge_bloqueado_en_procesando():
+    """La protección que ya existía para 'procesando' se mantiene."""
+    _crear_consulta_en_estado("TEST_PURGE_PROCESANDO", "procesando")
+
+    response = client.delete("/query/TEST_PURGE_PROCESANDO?purge=true")
+
+    assert response.status_code == 409
+
+
+def test_purge_con_force_procede_en_recibido():
+    """force=true sigue siendo la vía de escape para purgar de todas formas."""
+    _crear_consulta_en_estado("TEST_PURGE_FORCE", "recibido")
+    destino = os.path.join(TEST_DOWNLOAD_PATH, "TEST_PURGE_FORCE")
+    os.makedirs(destino, exist_ok=True)
+
+    response = client.delete("/query/TEST_PURGE_FORCE?purge=true&force=true")
+
+    assert response.status_code == 200
+    assert not os.path.isdir(destino)
+    assert main.db.obtener_consulta("TEST_PURGE_FORCE") is None
+
+
+def test_purge_no_bloqueado_en_completado():
+    """Una consulta terminada no tiene trabajo en vuelo: se purga sin force."""
+    _crear_consulta_en_estado("TEST_PURGE_COMPLETADO", "completado")
+
+    response = client.delete("/query/TEST_PURGE_COMPLETADO?purge=true")
+
+    assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Cerrojo de reproceso
+#
+# gunicorn corre con -w 4 y los workers no comparten memoria, así que dos
+# peticiones de reinicio se reparten entre procesos distintos y cada uno encola
+# su propia tarea sobre el mismo consulta_id. Ocurrió en producción con
+# GkpH6xne el 18-ago-2026: dos workers descargando los mismos 2380 archivos en
+# paralelo, duplicando cada línea de progreso en el journal.
+# ---------------------------------------------------------------------------
+
+def _envejecer_latido(consulta_id, segundos):
+    """Retrasa timestamp_actualizacion para simular una tarea muerta."""
+    viejo = (datetime.now() - timedelta(seconds=segundos)).isoformat()
+    with main.db._connect() as conn:
+        conn.execute(
+            "UPDATE consultas SET timestamp_actualizacion = ? WHERE id = ?",
+            (viejo, consulta_id),
+        )
+        conn.commit()
+
+
+def test_restart_rechaza_segunda_peticion_concurrente(recover_espia):
+    """Dos reinicios seguidos: el segundo recibe 409 y no encola nada.
+
+    El primero refresca el latido al reclamar, así que el segundo ve actividad
+    reciente y se corta — que es lo que faltaba cuando GkpH6xne se descargó dos
+    veces en paralelo.
+    """
+    _crear_consulta_en_estado("TEST_LOCK_DOBLE", "procesando")
+    _envejecer_latido("TEST_LOCK_DOBLE", main.LATIDO_MAXIMO_S + 60)
+
+    primera = client.post("/query/TEST_LOCK_DOBLE/restart")
+    segunda = client.post("/query/TEST_LOCK_DOBLE/restart")
+
+    assert primera.status_code == 202
+    assert segunda.status_code == 409
+    assert "ya se está procesando" in segunda.json()["detail"]
+    # Solo se encoló una tarea, no dos.
+    assert recover_espia.llamadas == ["TEST_LOCK_DOBLE"]
+
+
+def test_restart_permite_reclamar_tarea_muerta(recover_espia):
+    """Una consulta 'procesando' sin latido desde hace rato sí se reclama.
+
+    Es el caso GkpH6xne: el reinicio del servicio se llevó el BackgroundTask y
+    la fila quedó congelada. El cerrojo no debe convertir eso en irrecuperable.
+    """
+    _crear_consulta_en_estado("TEST_LOCK_MUERTA", "procesando")
+    _envejecer_latido("TEST_LOCK_MUERTA", main.LATIDO_MAXIMO_S + 3600)
+
+    response = client.post("/query/TEST_LOCK_MUERTA/restart")
+
+    assert response.status_code == 202
+    assert recover_espia.llamadas == ["TEST_LOCK_MUERTA"]
+
+
+def test_restart_bloquea_tarea_viva(recover_espia):
+    """Una consulta con latido reciente no se puede reiniciar."""
+    _crear_consulta_en_estado("TEST_LOCK_VIVA", "procesando")  # latido = ahora
+
+    response = client.post("/query/TEST_LOCK_VIVA/restart")
+
+    assert response.status_code == 409
+    assert recover_espia.llamadas == []
+
+
+def test_restart_de_completado_ignora_el_latido(recover_espia):
+    """'completado' y 'error' no tienen trabajo en curso: se reclaman siempre.
+
+    Sin esta excepción, reprocesar algo recién terminado quedaría bloqueado
+    durante LATIDO_MAXIMO_S por un latido que no representa a nadie trabajando.
+    """
+    for estado in ("completado", "error"):
+        consulta_id = f"TEST_LOCK_{estado.upper()}"
+        _crear_consulta_en_estado(consulta_id, estado)  # latido = ahora
+
+        response = client.post(f"/query/{consulta_id}/restart")
+
+        assert response.status_code == 202, f"{estado} quedó bloqueado por el latido"

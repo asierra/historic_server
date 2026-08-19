@@ -309,10 +309,18 @@ Requiere header `X-API-Key` si la variable `API_KEY` está configurada.
 Códigos y headers:
 - `202 Accepted`
 - `Location: /query/{ID}`
-- `400` si el estado no permite reinicio (ej. `recibido`)
+- `400` si el estado no permite reinicio
 - `404` si no existe
+- `409` si la consulta ya tiene una tarea en vuelo (hubo actividad en los últimos
+  900 s). Evita que dos peticiones repartidas entre workers de gunicorn encolen
+  dos tareas sobre el mismo `consulta_id` y descarguen todo por duplicado.
 
-Estados desde los que se puede reiniciar: `procesando`, `error`, `completado`.
+Estados desde los que se puede reiniciar: `recibido`, `procesando`, `error`, `completado`.
+
+`recibido` se acepta a propósito: la tarea de fondo vive en memoria
+(`BackgroundTasks`), así que una consulta se queda congelada en ese estado si el
+proceso muere entre el alta y el arranque del procesamiento. Ese es justamente el
+escenario para el que existe este endpoint.
 
 **Respuesta:**
 ```json
@@ -329,12 +337,12 @@ Requiere header `X-API-Key` si la variable `API_KEY` está configurada.
 
 Parámetros de query:
 - `purge` (bool, opcional): si es `true`, elimina el directorio `{DOWNLOAD_PATH}/{ID}`.
-- `force` (bool, opcional): si es `true`, permite purgar aunque la consulta esté en estado `procesando`.
+- `force` (bool, opcional): si es `true`, permite purgar aunque la consulta tenga trabajo en vuelo (estado `recibido` o `procesando`).
 
 Códigos de respuesta:
 - `200 OK` si se eliminó o se informó estado
 - `404` si no existe y no se indicó `purge`
-- `409` si se intenta purgar una consulta en proceso sin `force=true`
+- `409` si se intenta purgar una consulta con trabajo en vuelo (`recibido` o `procesando`) sin `force=true`
 
 Ejemplos:
 ```bash
@@ -344,7 +352,7 @@ curl -X DELETE "http://127.0.0.1:9041/query/$ID"
 # Eliminar registro y purgar directorio
 curl -X DELETE "http://127.0.0.1:9041/query/$ID?purge=true"
 
-# Forzar la purga aunque esté procesando
+# Forzar la purga aunque tenga trabajo en vuelo
 curl -X DELETE "http://127.0.0.1:9041/query/$ID?purge=true&force=true"
 ```
 
