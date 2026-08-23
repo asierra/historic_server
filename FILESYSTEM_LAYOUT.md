@@ -248,7 +248,7 @@ DOWNLOAD_PATH=/data/historic_downloads
 MAX_WORKERS=16
 
 # Características
-S3_FALLBACK_ENABLED=True
+S3_ENABLED=True
 LUSTRE_ENABLED=True
 
 # Seguridad

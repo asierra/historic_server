@@ -478,7 +478,7 @@ def test_simulator_report_has_correct_sources_structure(monkeypatch):
 def real_io_fixture(monkeypatch):
     """Fixture para configurar el entorno para pruebas de I/O real."""
     # Configurar settings para habilitar S3 y deshabilitar Lustre
-    monkeypatch.setattr(settings, "s3_fallback_enabled", True)
+    monkeypatch.setattr(settings, "s3_enabled", True)
     monkeypatch.setattr(settings, "lustre_enabled", True)  # Mantener habilitado para probar el fallback
     
     # Usamos la misma DB de prueba, pero con RecoverFiles

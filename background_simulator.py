@@ -22,7 +22,7 @@ class BackgroundSimulator():
         self.s3_success_rate = settings.sim_s3_success_rate
         # Añadir atributos para compatibilidad con el endpoint /health
         self.lustre_enabled = True
-        self.s3_fallback_enabled = True
+        self.s3_enabled = True
         logging.info(f"📈 Simulador inicializado con tasa de éxito local: {self.local_success_rate*100}% y S3: {self.s3_success_rate*100}%")
 
         self.etapas_simuladas = {

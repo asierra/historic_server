@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import Field, ConfigDict
+from pydantic import AliasChoices, Field, ConfigDict
 from pathlib import Path
 from typing import Optional
 
@@ -12,7 +12,11 @@ class Settings(BaseSettings):
     source_path: Path = Field("/depot/goes16", description="Root path of the primary storage (e.g., Lustre).")
     download_path: Path = Field("/data/tmp", description="Directory for query downloads.")
     max_workers: int = Field(8, description="Number of parallel I/O workers.")
-    s3_fallback_enabled: bool = Field(True, description="Enable/disable fallback to S3.")
+    s3_enabled: bool = Field(
+        True,
+        validation_alias=AliasChoices("s3_enabled", "s3_fallback_enabled"),
+        description="Enable/disable the S3 data source (accepts the former name S3_FALLBACK_ENABLED)."
+    )
     lustre_enabled: bool = Field(True, description="Enable/disable the use of Lustre.")
     file_processing_timeout_seconds: int = Field(120, description="Maximum processing time per file in seconds.")
     sim_local_success_rate: float = Field(0.8, ge=0.0, le=1.0, description="Local success rate in simulator mode.")

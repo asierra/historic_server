@@ -243,7 +243,7 @@ DB_PATH=/var/lib/historic_server/consultas_goes.db
 SOURCE_PATH=/depot/goes16
 DOWNLOAD_PATH=/data/historic_downloads
 MAX_WORKERS=8              # Ajustar según CPUs disponibles (2*cores + 1)
-S3_FALLBACK_ENABLED=True
+S3_ENABLED=True
 LUSTRE_ENABLED=True
 ```
 

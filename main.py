@@ -46,13 +46,13 @@ async def lifespan(app: FastAPI):
     executor = ProcessPool(max_workers=MAX_WORKERS)
     
     if PROCESSOR_MODE == "real":
-        S3_FALLBACK_ENABLED = settings.s3_fallback_enabled
+        S3_ENABLED = settings.s3_enabled
         recover = RecoverFiles(
             db=db,
             source_data_path=str(SOURCE_DATA_PATH),
             base_download_path=str(DOWNLOAD_PATH),
             executor=executor,
-            s3_fallback_enabled=S3_FALLBACK_ENABLED,
+            s3_enabled=S3_ENABLED,
             lustre_enabled=settings.lustre_enabled,
             file_processing_timeout_seconds=settings.file_processing_timeout_seconds
         )
@@ -176,7 +176,7 @@ async def health_check_detailed():
 
     # 3. Reportar estado de Lustre y S3
     lustre_status = getattr(recover, "lustre_enabled", None)
-    s3_status = getattr(recover, "s3_fallback_enabled", None)
+    s3_status = getattr(recover, "s3_enabled", None)
     if lustre_status is None:
         lustre_status = False
     if s3_status is None:

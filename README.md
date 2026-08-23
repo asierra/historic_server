@@ -43,7 +43,7 @@ La aplicación se configura mediante variables de entorno:
 | `MIN_FREE_SPACE_GB_BUFFER`      | Búfer de seguridad en GB que debe quedar libre en disco                  | `10`                |
 | `PROCESSOR_MODE`                | Modo del procesador de fondo: real o simulador                          | `real`              |
 | `S3_CONNECT_TIMEOUT`            | Timeout de conexión para S3 (segundos)                                   | `5`                 |
-| `S3_FALLBACK_ENABLED`           | Habilita o deshabilita el fallback a S3 (true/false, 1/0)               | `true`              |
+| `S3_ENABLED`                    | Habilita o deshabilita el origen S3 (true/false, 1/0). Acepta el nombre anterior `S3_FALLBACK_ENABLED` | `true`              |
 | `S3_PROGRESS_STEP`              | Actualizar progreso de descarga S3 cada N archivos                       | `100`               |
 | `S3_READ_TIMEOUT`               | Timeout de lectura para S3 (segundos)                                    | `30`                |
 | `S3_RETRY_ATTEMPTS`             | Número de reintentos para operaciones S3                                 | `3`                 |
@@ -61,7 +61,7 @@ DB_PATH=/data/db/historic_v1.db
 SOURCE_PATH=/depot/goes16
 DOWNLOAD_PATH=/data/tmp/v1
 MAX_WORKERS=8
-S3_FALLBACK_ENABLED=true
+S3_ENABLED=true
 LUSTRE_ENABLED=1
 ```
 

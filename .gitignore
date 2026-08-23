@@ -215,3 +215,4 @@ __marimo__/
 /TEST_*/
 *.db-shm
 *.db-wal
+tmp/
