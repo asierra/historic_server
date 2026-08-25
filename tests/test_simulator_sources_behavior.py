@@ -36,7 +36,12 @@ def override_db_for_tests(monkeypatch):
 client = TestClient(main.app)
 
 
-def _wait_until_completed(consulta_id: str, timeout_s: int = 20):
+# El simulador tarda ~9 s por consulta y este módulo hace cuatro esperas, así que
+# 20 s dejaban un margen de sólo 2x: cayó una de cada tres corridas completas, y en
+# un runner de GitHub (más lento que las máquinas del laboratorio) caería más. El
+# margen no cuesta nada: en el camino feliz se sale en cuanto el estado es
+# 'completado', y el timeout sólo se agota cuando la prueba ya iba a fallar.
+def _wait_until_completed(consulta_id: str, timeout_s: int = 60):
     start = time.time()
     while time.time() - start < timeout_s:
         data = client.get(f"/query/{consulta_id}").json()

@@ -24,12 +24,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run tests (unit + simulator behavior)
+      # Un solo paso por marcador, no por lista de archivos: la suite vive en
+      # tests/ y enumerarla a mano es justo lo que dejó este workflow roto
+      # desde 2331cc6 (31-oct-2025), invocando rutas de la raíz que ya no
+      # existían. Se excluye 'real_io' (S3/disco reales), lo demás corre todo.
+      - name: Run tests (todo salvo I/O real)
         env:
+          # Redundante con el bloque `env =` de pytest.ini y a propósito: si
+          # faltara pytest-env, ese bloque se ignora en silencio y las pruebas
+          # correrían en modo real contra Lustre/S3 sin avisar.
           PROCESSOR_MODE: simulador
-        run: |
-          pytest -q test_simulator_sources_behavior.py test_api.py
-
-      - name: Run recover behavior tests (no real IO)
-        run: |
-          pytest -q test_recover_behavior.py
+        run: pytest -q -m "not real_io"

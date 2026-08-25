@@ -616,7 +616,10 @@ def test_complex_query_does_not_get_stuck(monkeypatch):
 
     # 2. Monitorear hasta que se complete, con un timeout generoso
     # Si el proceso se atora, este bucle fallará por timeout.
-    timeout = 20  # segundos
+    # 60 s y no 20: es la consulta más pesada de la suite (30 fechas con varios
+    # rangos cada una) y 20 s no daban margen en un runner de CI. Lo que se
+    # quiere detectar aquí es que el pipeline se atore, no cuánto tarda.
+    timeout = 60  # segundos
     start_time = time.time()
     while time.time() - start_time < timeout:
         get_response = client.get(f"/query/{TEST_ID}")

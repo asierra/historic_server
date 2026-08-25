@@ -32,7 +32,7 @@ python tools/get_query.py <consulta_id> [--db PATH] [--original]
 python tools/diff_queries.py --base A.json --excluir B.json --out C.json
 ```
 
-CI (`.github/workflows/ci.yml`) runs `pytest -q test_simulator_sources_behavior.py test_api.py` and a `test_recover_behavior.py` step — note the latter file doesn't currently exist at repo root, so that CI step is broken/stale as of this writing.
+CI (`.github/workflows/ci.yml`) runs `pytest -q -m "not real_io"` — the same command you should run locally before pushing. It selects by marker on purpose: the previous version named files at the repo root, which stopped existing when the suite moved into `tests/` in `2331cc6` (2025-10-31), so CI failed on every push for 25 commits without anyone reading it. Don't reintroduce a file list. The suite needs no real storage (fixtures monkeypatch `SOURCE_PATH`/`DOWNLOAD_PATH`), so it passes on a bare runner.
 
 There's no linter configured. `SECURITY.md` / `PRE_DEPLOYMENT_CHECKLIST.md` / `DEPLOYMENT_GUIDE.md` cover pre-deploy steps — nothing is enforced in CI beyond tests.
 
