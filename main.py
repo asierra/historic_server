@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, Request
+from fastapi import FastAPI, HTTPException, Body, Request
 from fastapi.responses import JSONResponse
 from database import ConsultasDatabase, DATABASE_PATH
 from background_simulator import BackgroundSimulator
@@ -22,6 +22,7 @@ import secrets
 import string
 from settings import settings
 from pebble import ProcessPool
+from cola import BucleDeCola
 from logging_config import setup_logging
 
 # --- Configuración de Logging ---
@@ -30,7 +31,7 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global executor, db, processor, recover
+    global executor, db, processor, recover, bucle
     """
     Gestiona el ciclo de vida de la aplicación. El código antes del `yield`
     se ejecuta al iniciar, y el código después se ejecuta al apagar.
@@ -39,7 +40,9 @@ async def lifespan(app: FastAPI):
     log.info("🚀 Servidor iniciando...")
     
     # Inicializar componentes
-    db = ConsultasDatabase(db_path=str(DB_PATH))
+    # El lease se le pasa a la base porque quien lo renueva es
+    # `actualizar_estado`, llamado desde dentro del pipeline.
+    db = ConsultasDatabase(db_path=str(DB_PATH), lease_s=settings.queue_lease_s)
     processor = HistoricQueryProcessor()
     
     MAX_WORKERS = settings.max_workers
@@ -59,9 +62,23 @@ async def lifespan(app: FastAPI):
     else:
         recover = BackgroundSimulator(db)
 
+    # El consumidor de la cola. Uno por proceso de gunicorn; el reclamo es
+    # atómico, así que compiten sin pisarse (PLAN_COLA_DURABLE.md §5-2.1).
+    bucle = BucleDeCola(
+        db=db,
+        recover=recover,
+        poll_s=settings.queue_poll_s,
+        lease_s=settings.queue_lease_s,
+    )
+    bucle.arrancar()
+
     yield
     # Código de apagado
     log.info("⏳ Servidor recibiendo señal de apagado...")
+    # Primero el bucle, para que no reclame nada mientras se cierra el pool.
+    # No suelta lo que tenga en curso a propósito: ver BucleDeCola.parar().
+    if bucle:
+        bucle.parar()
     if executor:
         log.info("   Esperando a que las tareas de fondo se completen...")
         executor.close()
@@ -122,18 +139,14 @@ MAX_SIZE_MB_PER_QUERY = settings.max_size_mb_per_query
 MIN_FREE_SPACE_GB_BUFFER = settings.min_free_space_gb_buffer
 
 # --- Estados con trabajo en vuelo ---
-# 'recibido' = aceptada y encolada; 'procesando' = el pipeline ya está trabajando.
-# La tarea de fondo vive en memoria (BackgroundTasks), así que una consulta puede
-# quedarse en 'recibido' si el proceso muere antes de que la tarea arranque: por eso
-# ambos estados son reiniciables y ambos protegen el directorio frente a un purge.
+# 'recibido' = encolada y disponible para que un consumidor la reclame;
+# 'procesando' = alguien la tiene, con el lease vivo.
+#
+# Los dos siguen protegiendo el directorio frente a un purge: 'procesando' porque
+# hay alguien escribiendo ahora mismo, y 'recibido' porque el bucle puede
+# reclamarla en cualquier momento y recrear lo que se acabe de borrar.
 ESTADOS_EN_VUELO = ("recibido", "procesando")
 ESTADOS_REINICIABLES = ESTADOS_EN_VUELO + ("error", "completado")
-
-# Cuánto puede pasar sin que el pipeline refresque `timestamp_actualizacion` antes
-# de dar por muerta la tarea y permitir reclamar la consulta. Holgado a propósito:
-# las fases de listado (Lustre, S3) tardan en producir el primer avance, y matar
-# trabajo real es peor que esperar de más para reintentar.
-LATIDO_MAXIMO_S = 900
 
 # Selección del procesador de background mediante variable de entorno
 PROCESSOR_MODE = settings.processor_mode
@@ -143,6 +156,7 @@ executor = None
 db = None
 processor = None
 recover = None
+bucle = None  # BucleDeCola: el consumidor de la cola de este proceso
 
 
 def generar_id_consulta() -> str:
@@ -182,12 +196,33 @@ async def health_check_detailed():
     if s3_status is None:
         s3_status = False
 
+    # 4. La cola. Es el único fallo de esta arquitectura que no se ve desde
+    #    fuera: si el hilo muere, la API sigue aceptando consultas y
+    #    respondiendo 202 mientras la cola crece sin que nadie la drene.
+    cola_status = {
+        "hilo_vivo": bool(bucle and bucle.vivo),
+        "worker_id": getattr(bucle, "worker_id", None),
+        "consulta_en_curso": getattr(bucle, "consulta_en_curso", None),
+    }
+    try:
+        por_estado = db.contar_por_estado()
+        cola_status["encoladas"] = por_estado.get("recibido", 0)
+        cola_status["procesando"] = por_estado.get("procesando", 0)
+    except Exception as e:
+        cola_status["error"] = str(e)
+
+    # Un hilo muerto no tumba /health por sí solo —el proceso sigue sirviendo—
+    # pero con trabajo encolado y nadie que lo coja, el servicio no está sano.
+    if not cola_status["hilo_vivo"] and cola_status.get("encoladas"):
+        overall_status = "error"
+
     status_code = 200 if overall_status == "ok" else 503 # Service Unavailable
 
     return {
         "status": overall_status,
         "database": db_status,
         "storage": storage_status,
+        "cola": cola_status,
         "lustre_enabled": lustre_status,
         "s3_enabled": s3_status,
         "s3_circuit_breaker": {
@@ -308,7 +343,6 @@ def _validate_and_prepare_request(request_data: Dict[str, Any]) -> Tuple[Dict[st
 
 @app.post("/query")
 async def crear_solicitud(
-    background_tasks: BackgroundTasks,
     request: Request,
     request_data: Dict[str, Any] = Body(...),
 ):
@@ -335,8 +369,10 @@ async def crear_solicitud(
         if not db.crear_consulta(consulta_id, query_dict):
             raise HTTPException(status_code=409, detail=f"La consulta '{consulta_id}' ya existe. Use un ID diferente o elimine la consulta existente.")
         
-        # Procesar en background
-        background_tasks.add_task(recover.procesar_consulta, consulta_id, query_dict)
+        # No se lanza nada aquí: el INSERT ya deja la consulta encolada en
+        # 'recibido' y el bucle la recogerá. Ésa es toda la diferencia — antes
+        # el trabajo vivía en la memoria de este proceso y un reinicio se lo
+        # llevaba; ahora vive en la fila.
         
         body = {
             "success": True,
@@ -383,7 +419,7 @@ async def validar_solicitud(request_data: Dict[str, Any] = Body(...)):
         raise e
 
 @app.post("/query/{consulta_id}/restart")
-async def reiniciar_consulta(consulta_id: str, background_tasks: BackgroundTasks, request: Request):
+async def reiniciar_consulta(consulta_id: str, request: Request):
     """
     ✅ ENDPOINT DE RECUPERACIÓN: Reinicia una consulta que se quedó atascada.
     Busca una consulta existente y la vuelve a encolar para su procesamiento.
@@ -408,24 +444,20 @@ async def reiniciar_consulta(consulta_id: str, background_tasks: BackgroundTasks
             )
         )
 
-    # Reclamar la consulta antes de encolar nada. El UPDATE condicional resetea el
-    # estado —para que el cliente no vea uno obsoleto— y a la vez hace de cerrojo
-    # entre los 4 workers de gunicorn, que no comparten memoria: sin él, dos
-    # peticiones simultáneas encolan dos tareas sobre el mismo consulta_id y
-    # descargan cada archivo por duplicado.
-    if not db.reclamar_para_reproceso(consulta_id, ESTADOS_EN_VUELO, LATIDO_MAXIMO_S):
+    # Devolverla a la cola. `reencolar` se niega si alguien la tiene con el
+    # lease vivo, que es el mismo cerrojo de antes con mejor señal: el lease lo
+    # renueva el pipeline en cada avance, así que estar vivo significa estar
+    # avanzando. Sin esto, reiniciar una consulta que se está descargando la
+    # pondría a disposición de otro consumidor y acabarían los dos escribiendo
+    # en el mismo directorio.
+    if not db.reencolar(consulta_id):
         raise HTTPException(
             status_code=409,
             detail=(
-                f"La consulta '{consulta_id}' ya se está procesando (hubo actividad en "
-                f"los últimos {LATIDO_MAXIMO_S} s). Espera a que termine o falle antes "
-                "de reiniciarla."
+                f"La consulta '{consulta_id}' ya se está procesando. Espera a que "
+                "termine o falle antes de reiniciarla."
             )
         )
-
-    # Volver a encolar la tarea usando la query original guardada en la DB
-    query_dict = consulta["query"]
-    background_tasks.add_task(recover.procesar_consulta, consulta_id, query_dict)
 
     body = {
         "success": True,

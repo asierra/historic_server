@@ -8,6 +8,7 @@ from background_simulator import BackgroundSimulator
 from database import ConsultasDatabase
 from processors import HistoricQueryProcessor
 from settings import settings
+from tests.conftest import cola_drenando
 
 TEST_DB_PATH = "test_consultas_sources.db"
 TEST_DOWNLOAD_PATH = "./test_downloads_sources"
@@ -32,6 +33,17 @@ def override_db_for_tests(monkeypatch):
             os.remove(TEST_DB_PATH)
         if os.path.exists(TEST_DOWNLOAD_PATH):
             shutil.rmtree(TEST_DOWNLOAD_PATH)
+
+@pytest.fixture(autouse=True)
+def cola_activa(override_db_for_tests):
+    """Todas las pruebas de este módulo esperan a 'completado', así que autouse.
+
+    Depende de `override_db_for_tests` de forma explícita para garantizar el
+    orden: el bucle tiene que ver la DB de prueba ya parcheada, no la real.
+    """
+    with cola_drenando() as bucle:
+        yield bucle
+
 
 client = TestClient(main.app)
 

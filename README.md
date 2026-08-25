@@ -124,11 +124,11 @@ Verificación mínima de que el servidor está activo.
 
 ### 2. Verificación de salud (`GET /health`)
 
-Verifica el estado de la base de datos, la accesibilidad al almacenamiento primario (Lustre) y reporta si Lustre y S3 están habilitados.
+Verifica el estado de la base de datos, la accesibilidad al almacenamiento primario (Lustre), el consumidor de la cola, y reporta si Lustre y S3 están habilitados.
 
 Códigos de respuesta:
 - `200 OK` si todo está bien
-- `503 Service Unavailable` si existe algún fallo
+- `503 Service Unavailable` si existe algún fallo, **incluido que el hilo de la cola esté muerto con consultas encoladas**
 
 **Respuesta:**
 ```json
@@ -136,6 +136,13 @@ Códigos de respuesta:
     "status": "ok",
     "database": "ok",
     "storage": "ok",
+    "cola": {
+        "hilo_vivo": true,
+        "worker_id": "tahan:31415",
+        "consulta_en_curso": "aBcDeF12",
+        "encoladas": 0,
+        "procesando": 1
+    },
     "lustre_enabled": true,
     "s3_enabled": true,
     "s3_circuit_breaker": {
@@ -147,6 +154,13 @@ Códigos de respuesta:
     "timestamp": "2024-01-15T10:00:00.000000"
 }
 ```
+
+El bloque `cola` es el que hay que mirar cuando las consultas no avanzan. Cada
+proceso de gunicorn corre su propio consumidor, así que `worker_id` y
+`consulta_en_curso` cambian según cuál conteste; `encoladas` y `procesando` salen
+de la base y son iguales para todos. **Una cola que crece con `hilo_vivo: false`
+es el único fallo que no se ve desde fuera**: la API sigue aceptando consultas y
+respondiendo `202` mientras nadie las procesa.
 
 Estados posibles de `s3_circuit_breaker.state`:
 - `closed` — operación normal
@@ -314,16 +328,20 @@ Códigos y headers:
 - `Location: /query/{ID}`
 - `400` si el estado no permite reinicio
 - `404` si no existe
-- `409` si la consulta ya tiene una tarea en vuelo (hubo actividad en los últimos
-  900 s). Evita que dos peticiones repartidas entre workers de gunicorn encolen
-  dos tareas sobre el mismo `consulta_id` y descarguen todo por duplicado.
+- `409` si alguien la está procesando ahora mismo, es decir si su *lease* sigue
+  vivo. Reencolarla la pondría a disposición de otro consumidor mientras el
+  primero sigue escribiendo en el mismo directorio, que es cómo se acabaron
+  descargando 2380 archivos por duplicado.
 
 Estados desde los que se puede reiniciar: `recibido`, `procesando`, `error`, `completado`.
 
-`recibido` se acepta a propósito: la tarea de fondo vive en memoria
-(`BackgroundTasks`), así que una consulta se queda congelada en ese estado si el
-proceso muere entre el alta y el arranque del procesamiento. Ese es justamente el
-escenario para el que existe este endpoint.
+Dos reinicios seguidos devuelven los dos `202`: reencolar es idempotente y la
+exclusión se hace al reclamar, no aquí.
+
+`recibido` se acepta a propósito, aunque desde la cola durable ya casi no hace
+falta: una consulta encolada la recoge el bucle sola, y una que perdió a su dueño
+vuelve a la cola al vencer el lease. El endpoint queda para adelantar esa espera
+y para reprocesar algo ya terminado.
 
 **Respuesta:**
 ```json

@@ -6,12 +6,13 @@ import shutil
 import time
 import re
 from background_simulator import BackgroundSimulator
-from database import ConsultasDatabase
+from database import ConsultasDatabase, LEASE_POR_DEFECTO_S
 import os
 from datetime import datetime, timedelta
 from recover import RecoverFiles  # Importar el procesador real para la prueba de integración
 from processors import HistoricQueryProcessor
 from settings import settings
+from tests.conftest import cola_drenando
 
 # --- Configuración de la Base de Datos de Prueba ---
 
@@ -54,6 +55,18 @@ def override_db_for_tests(monkeypatch):
             os.remove(TEST_DB_PATH)
         if os.path.exists(TEST_DOWNLOAD_PATH):
             shutil.rmtree(TEST_DOWNLOAD_PATH)
+
+@pytest.fixture
+def cola_activa():
+    """Arranca el bucle de cola mientras dure la prueba.
+
+    Sólo lo piden las pruebas que esperan a ver 'completado'. No es autouse a
+    propósito: las que comprueban en qué estado deja la fila un endpoint no
+    quieren un consumidor reclamándola por detrás a mitad de aserción.
+    """
+    with cola_drenando() as bucle:
+        yield bucle
+
 
 # El cliente de prueba ahora usará la app con los objetos ya parcheados
 client = TestClient(main.app)
@@ -328,7 +341,7 @@ def test_internal_date_format_is_julian(monkeypatch):
     assert "2023299" in fechas_internas
     assert "20231026" not in fechas_internas
 
-def test_query_and_get_status(monkeypatch):
+def test_query_and_get_status(cola_activa, monkeypatch):
     """Prueba un flujo completo: crear, monitorear y verificar una consulta."""
     # Definimos un ID de prueba constante para este test
     TEST_ID = "TEST_FLUJO_COMPLETO"
@@ -345,7 +358,12 @@ def test_query_and_get_status(monkeypatch):
 
     # 2. Monitorear la consulta hasta que se complete
     # Esto hace la prueba más robusta al esperar el estado final.
-    for _ in range(10): # Intentar por un máximo de 10 segundos
+    # 60 s: el simulador tarda ~9 s y los presupuestos de 10-15 s dejaban un
+    # margen de 1.1x-1.6x. Es el mismo defecto que ya se corrigió en las esperas
+    # de test_simulator_sources_behavior.py, y desde la entrega 2 hay además el
+    # sondeo del bucle de por medio. En el camino feliz se sale en cuanto está
+    # 'completado'; el presupuesto sólo se agota si la prueba ya iba a fallar.
+    for _ in range(60):
         get_response = client.get(f"/query/{TEST_ID}")
         assert get_response.status_code in (200, 202)
         get_data = get_response.json()
@@ -381,7 +399,7 @@ def test_list_queries():
     assert "consultas" in data
     assert isinstance(data["consultas"], list)
 
-def test_recovery_query_is_generated_on_failure(monkeypatch):
+def test_recovery_query_is_generated_on_failure(cola_activa, monkeypatch):
     """
     Verifica que se genera una 'consulta_recuperacion' cuando el simulador
     fuerza un fallo en la recuperación de archivos.
@@ -411,7 +429,12 @@ def test_recovery_query_is_generated_on_failure(monkeypatch):
     assert create_response.status_code == 202
 
     # 2. Esperar a que se complete
-    for _ in range(10):
+    # 60 s: el simulador tarda ~9 s y los presupuestos de 10-15 s dejaban un
+    # margen de 1.1x-1.6x. Es el mismo defecto que ya se corrigió en las esperas
+    # de test_simulator_sources_behavior.py, y desde la entrega 2 hay además el
+    # sondeo del bucle de por medio. En el camino feliz se sale en cuanto está
+    # 'completado'; el presupuesto sólo se agota si la prueba ya iba a fallar.
+    for _ in range(60):
         get_response = client.get(f"/query/{TEST_ID}")
         if get_response.json()["estado"] == "completado":
             break
@@ -430,7 +453,7 @@ def test_recovery_query_is_generated_on_failure(monkeypatch):
     assert "20231026" in rec_query["fechas"]
     assert rec_query["fechas"]["20231026"] == ["12:00"]
 
-def test_simulator_report_has_correct_sources_structure(monkeypatch):
+def test_simulator_report_has_correct_sources_structure(cola_activa, monkeypatch):
     """
     Verifica que el reporte final del simulador tiene la estructura correcta
     de 'fuentes' (lustre y s3), que implementamos anteriormente.
@@ -442,8 +465,12 @@ def test_simulator_report_has_correct_sources_structure(monkeypatch):
     create_response = client.post("/query", json=VALID_REQUEST)
     assert create_response.status_code == 202
 
-    # 2. Esperar a que el simulador complete el trabajo
-    for _ in range(10):
+    # 2. Esperar a que el simulador complete el trabajo.
+    #    60 s y no 10: el simulador tarda ~9 s, así que el margen era de 1.1x
+    #    —el mismo defecto que ya se corrigió en las otras esperas de la suite—
+    #    y desde la entrega 2 hay además el sondeo del bucle de por medio. En el
+    #    camino feliz se sale en cuanto está 'completado'.
+    for _ in range(60):
         get_response = client.get(f"/query/{TEST_ID}")
         if get_response.json()["estado"] == "completado":
             break
@@ -493,7 +520,7 @@ def real_io_fixture(monkeypatch):
     yield
 
 @pytest.mark.real_io
-def test_s3_fallback_integration(real_io_fixture, monkeypatch):
+def test_s3_fallback_integration(real_io_fixture, cola_activa, monkeypatch):
     """
     Prueba de integración que verifica el fallback a S3 con un archivo L1b real.
     """
@@ -529,7 +556,7 @@ def test_s3_fallback_integration(real_io_fixture, monkeypatch):
     assert resultados["fuentes"]["s3"]["total"] > 0
 
 @pytest.mark.real_io
-def test_s3_fallback_integration_l2_multi_product(real_io_fixture, monkeypatch):
+def test_s3_fallback_integration_l2_multi_product(real_io_fixture, cola_activa, monkeypatch):
     """
     Prueba de integración que verifica el fallback a S3 para productos L2 múltiples (ACHA y CMIP).
     """
@@ -575,7 +602,7 @@ def test_s3_fallback_integration_l2_multi_product(real_io_fixture, monkeypatch):
     acha_files = [a for a in archivos if "-L2-ACHAC-" in a]
     assert acha_files, "No se generaron archivos ACHA"
 
-def test_complex_query_does_not_get_stuck(monkeypatch):
+def test_complex_query_does_not_get_stuck(cola_activa, monkeypatch):
     """
     Verifica que una consulta compleja con muchas fechas y rangos no se queda
     atorada en el procesamiento y se completa correctamente.
@@ -634,7 +661,7 @@ def test_complex_query_does_not_get_stuck(monkeypatch):
     # 3. Verificar que el estado final es 'completado'
     assert get_data["estado"] == "completado"
 
-def test_simulator_l2_cmip_respects_requested_band(monkeypatch):
+def test_simulator_l2_cmip_respects_requested_band(cola_activa, monkeypatch):
     """CMIP con bandas=['13'] solo debe generar archivos C13."""
     TEST_ID = "TEST_CMIP_ONLY_C13"
     monkeypatch.setattr("main.generar_id_consulta", lambda: TEST_ID)
@@ -651,7 +678,12 @@ def test_simulator_l2_cmip_respects_requested_band(monkeypatch):
     create_response = client.post("/query", json=req)
     assert create_response.status_code == 202
 
-    for _ in range(15):
+    # 60 s: el simulador tarda ~9 s y los presupuestos de 10-15 s dejaban un
+    # margen de 1.1x-1.6x. Es el mismo defecto que ya se corrigió en las esperas
+    # de test_simulator_sources_behavior.py, y desde la entrega 2 hay además el
+    # sondeo del bucle de por medio. En el camino feliz se sale en cuanto está
+    # 'completado'; el presupuesto sólo se agota si la prueba ya iba a fallar.
+    for _ in range(60):
         get_resp = client.get(f"/query/{TEST_ID}")
         if get_resp.json()["estado"] == "completado":
             break
@@ -668,7 +700,7 @@ def test_simulator_l2_cmip_respects_requested_band(monkeypatch):
     assert all("-M6C13_" in a for a in cmip_files)
     assert all("-M6C" in a and not any(f"-M6C{b:02d}_" in a for b in range(1,17) if b != 13) for a in cmip_files)
 
-def test_l2_cmip_without_bandas_expands_to_all(monkeypatch):
+def test_l2_cmip_without_bandas_expands_to_all(cola_activa, monkeypatch):
     """
     Si no se envían bandas para L2+CMIP, se debe expandir a ALL (01..16).
     Verificamos que el simulador genere archivos con múltiples bandas Cdd.
@@ -687,7 +719,12 @@ def test_l2_cmip_without_bandas_expands_to_all(monkeypatch):
     resp = client.post("/query", json=req)
     assert resp.status_code == 202
 
-    for _ in range(15):
+    # 60 s: el simulador tarda ~9 s y los presupuestos de 10-15 s dejaban un
+    # margen de 1.1x-1.6x. Es el mismo defecto que ya se corrigió en las esperas
+    # de test_simulator_sources_behavior.py, y desde la entrega 2 hay además el
+    # sondeo del bucle de por medio. En el camino feliz se sale en cuanto está
+    # 'completado'; el presupuesto sólo se agota si la prueba ya iba a fallar.
+    for _ in range(60):
         st = client.get(f"/query/{TEST_ID}").json()
         if st["estado"] == "completado":
             break
@@ -712,10 +749,10 @@ def test_l2_cmip_without_bandas_expands_to_all(monkeypatch):
 # ---------------------------------------------------------------------------
 # Estados con trabajo en vuelo: 'recibido' y 'procesando'
 #
-# Una consulta queda en 'recibido' entre el INSERT y el arranque de la tarea de
-# fondo. Como BackgroundTasks vive en memoria, ahí se queda para siempre si el
-# proceso muere en esa ventana: por eso 'recibido' debe ser reiniciable y debe
-# proteger el directorio frente a un purge sin force.
+# 'recibido' = encolada y disponible; 'procesando' = alguien la tiene con el
+# lease vivo. Los dos protegen el directorio frente a un purge sin force: en
+# 'procesando' hay alguien escribiendo ahora mismo, y en 'recibido' el bucle
+# puede reclamarla en cualquier momento y recrear lo que se acabe de borrar.
 # ---------------------------------------------------------------------------
 
 QUERY_DICT_MINIMO = {
@@ -757,13 +794,13 @@ def test_restart_acepta_recibido(recover_espia):
     """
     _crear_consulta_en_estado("TEST_RESTART_RECIBIDO", "recibido")
     # Sin latido reciente: la tarea murió hace rato, que es el escenario real.
-    _envejecer_latido("TEST_RESTART_RECIBIDO", main.LATIDO_MAXIMO_S + 60)
+    _envejecer_latido("TEST_RESTART_RECIBIDO", LEASE_POR_DEFECTO_S + 60)
 
     response = client.post("/query/TEST_RESTART_RECIBIDO/restart")
 
     assert response.status_code == 202
     assert response.json()["success"] is True
-    assert recover_espia.llamadas == ["TEST_RESTART_RECIBIDO"]
+    assert _esta_encolada("TEST_RESTART_RECIBIDO")
 
 
 def test_restart_acepta_procesando_error_y_completado(recover_espia):
@@ -773,12 +810,12 @@ def test_restart_acepta_procesando_error_y_completado(recover_espia):
         _crear_consulta_en_estado(consulta_id, estado)
         # 'procesando' necesita latido viejo para no chocar con el cerrojo;
         # a 'error' y 'completado' no les aplica.
-        _envejecer_latido(consulta_id, main.LATIDO_MAXIMO_S + 60)
+        _envejecer_latido(consulta_id, LEASE_POR_DEFECTO_S + 60)
 
         response = client.post(f"/query/{consulta_id}/restart")
 
         assert response.status_code == 202, f"estado {estado} rechazado"
-        assert recover_espia.llamadas[i] == consulta_id
+        assert _esta_encolada(consulta_id)
 
 
 def test_restart_rechaza_estado_no_reiniciable(recover_espia):
@@ -789,7 +826,8 @@ def test_restart_rechaza_estado_no_reiniciable(recover_espia):
 
     assert response.status_code == 400
     assert "estado_desconocido" in response.json()["detail"]
-    assert recover_espia.llamadas == []
+    # Y la fila se queda como estaba, no medio reencolada.
+    assert _fila("TEST_RESTART_RARO")["estado"] == "estado_desconocido"
 
 
 def test_purge_bloqueado_en_recibido():
@@ -849,34 +887,72 @@ def test_purge_no_bloqueado_en_completado():
 # ---------------------------------------------------------------------------
 
 def _envejecer_latido(consulta_id, segundos):
-    """Retrasa timestamp_actualizacion para simular una tarea muerta."""
+    """Retrasa el latido y vence el lease, para simular un consumidor muerto.
+
+    Toca los dos porque son dos épocas del mismo mecanismo: el latido era la
+    señal antes de la cola y sigue rescatando huérfanas de entonces; el lease
+    es la señal ahora. Una consulta 'procesando' con lease vivo está viva, sin
+    importar lo viejo que sea el latido.
+    """
     viejo = (datetime.now() - timedelta(seconds=segundos)).isoformat()
     with main.db._connect() as conn:
         conn.execute(
-            "UPDATE consultas SET timestamp_actualizacion = ? WHERE id = ?",
-            (viejo, consulta_id),
+            "UPDATE consultas SET timestamp_actualizacion = ?, lease_hasta = ? WHERE id = ?",
+            (viejo, viejo, consulta_id),
         )
         conn.commit()
 
 
-def test_restart_rechaza_segunda_peticion_concurrente(recover_espia):
-    """Dos reinicios seguidos: el segundo recibe 409 y no encola nada.
+def _fila(consulta_id):
+    """Fila cruda: _row_to_dict no expone las columnas de la cola a propósito."""
+    import sqlite3
+    with main.db._connect() as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(
+            "SELECT * FROM consultas WHERE id = ?", (consulta_id,)
+        ).fetchone()
 
-    El primero refresca el latido al reclamar, así que el segundo ve actividad
-    reciente y se corta — que es lo que faltaba cuando GkpH6xne se descargó dos
-    veces en paralelo.
+
+def _esta_encolada(consulta_id):
+    """¿Queda lista para que un consumidor la coja?
+
+    Sustituye a comprobar que el endpoint llamó al pipeline. Desde la entrega 2
+    ningún endpoint lanza trabajo: dejan la fila en 'recibido', sin dueño y sin
+    aplazar, y el bucle la recoge. Que la fila quede así **es** el contrato.
+    """
+    fila = _fila(consulta_id)
+    return (
+        fila is not None
+        and fila["estado"] == "recibido"
+        and fila["lease_hasta"] is None
+        and fila["worker_id"] is None
+        and fila["disponible_desde"] is None
+    )
+
+
+def test_restart_dos_veces_encola_una_sola_vez(recover_espia):
+    """Dos reinicios seguidos son inocuos, y de ahí sólo sale un consumidor.
+
+    **El invariante cambió con la cola.** Antes el primer reinicio refrescaba el
+    latido y el segundo recibía 409. Ahora los dos devuelven 202 —reencolar es
+    idempotente, deja la misma fila en 'recibido'— y la exclusión se hace donde
+    de verdad importa: al reclamar. Que dos peticiones no acaben en dos
+    descargas del mismo archivo sigue siendo el punto; sólo cambió dónde se
+    impide, y ahora cubre también a quien no pasó por /restart.
     """
     _crear_consulta_en_estado("TEST_LOCK_DOBLE", "procesando")
-    _envejecer_latido("TEST_LOCK_DOBLE", main.LATIDO_MAXIMO_S + 60)
+    _envejecer_latido("TEST_LOCK_DOBLE", LEASE_POR_DEFECTO_S + 60)
 
     primera = client.post("/query/TEST_LOCK_DOBLE/restart")
     segunda = client.post("/query/TEST_LOCK_DOBLE/restart")
 
     assert primera.status_code == 202
-    assert segunda.status_code == 409
-    assert "ya se está procesando" in segunda.json()["detail"]
-    # Solo se encoló una tarea, no dos.
-    assert recover_espia.llamadas == ["TEST_LOCK_DOBLE"]
+    assert segunda.status_code == 202
+    assert _esta_encolada("TEST_LOCK_DOBLE")
+
+    # Y de los dos reinicios sale un único consumidor, que es lo que importa.
+    assert main.db.reclamar_siguiente("w1") is not None
+    assert main.db.reclamar_siguiente("w2") is None
 
 
 def test_restart_permite_reclamar_tarea_muerta(recover_espia):
@@ -886,29 +962,37 @@ def test_restart_permite_reclamar_tarea_muerta(recover_espia):
     la fila quedó congelada. El cerrojo no debe convertir eso en irrecuperable.
     """
     _crear_consulta_en_estado("TEST_LOCK_MUERTA", "procesando")
-    _envejecer_latido("TEST_LOCK_MUERTA", main.LATIDO_MAXIMO_S + 3600)
+    _envejecer_latido("TEST_LOCK_MUERTA", LEASE_POR_DEFECTO_S + 3600)
 
     response = client.post("/query/TEST_LOCK_MUERTA/restart")
 
     assert response.status_code == 202
-    assert recover_espia.llamadas == ["TEST_LOCK_MUERTA"]
+    assert _esta_encolada("TEST_LOCK_MUERTA")
 
 
 def test_restart_bloquea_tarea_viva(recover_espia):
-    """Una consulta con latido reciente no se puede reiniciar."""
-    _crear_consulta_en_estado("TEST_LOCK_VIVA", "procesando")  # latido = ahora
+    """Una consulta con el lease vivo no se puede reiniciar.
+
+    Es la protección que impide que un reinicio a destiempo ponga a disposición
+    de otro consumidor una consulta que se está descargando ahora mismo. El
+    lease lo renueva `actualizar_estado` en cada avance, así que 'procesando'
+    recién puesto significa que hay alguien trabajando.
+    """
+    _crear_consulta_en_estado("TEST_LOCK_VIVA", "procesando")  # lease = ahora + 15 min
 
     response = client.post("/query/TEST_LOCK_VIVA/restart")
 
     assert response.status_code == 409
-    assert recover_espia.llamadas == []
+    assert "ya se está procesando" in response.json()["detail"]
+    assert _fila("TEST_LOCK_VIVA")["estado"] == "procesando"
 
 
 def test_restart_de_completado_ignora_el_latido(recover_espia):
     """'completado' y 'error' no tienen trabajo en curso: se reclaman siempre.
 
-    Sin esta excepción, reprocesar algo recién terminado quedaría bloqueado
-    durante LATIDO_MAXIMO_S por un latido que no representa a nadie trabajando.
+    Sin esta excepción, reprocesar algo recién terminado quedaría bloqueado por
+    una señal que no representa a nadie trabajando. `actualizar_estado` sólo
+    renueva el lease en 'procesando', justo por esto.
     """
     for estado in ("completado", "error"):
         consulta_id = f"TEST_LOCK_{estado.upper()}"
@@ -947,8 +1031,8 @@ def test_crear_consulta_sin_api_key_es_rechazada(con_api_key, recover_espia):
     response = client.post("/query", json=VALID_REQUEST)
 
     assert response.status_code == 401
-    # Y no encoló nada: el rechazo ocurre antes de tocar la DB o el pipeline.
-    assert recover_espia.llamadas == []
+    # Y no encoló nada: el rechazo ocurre antes de tocar la DB.
+    assert main.db.listar_consultas() == []
 
 
 def test_crear_consulta_con_api_key_incorrecta_es_rechazada(con_api_key, recover_espia):
@@ -957,7 +1041,7 @@ def test_crear_consulta_con_api_key_incorrecta_es_rechazada(con_api_key, recover
     )
 
     assert response.status_code == 401
-    assert recover_espia.llamadas == []
+    assert main.db.listar_consultas() == []
 
 
 def test_crear_consulta_con_api_key_correcta_procede(con_api_key, recover_espia, monkeypatch):
@@ -974,7 +1058,7 @@ def test_crear_consulta_con_api_key_correcta_procede(con_api_key, recover_espia,
 
     assert response.status_code == 202
     assert response.json()["consulta_id"] == "TEST_APIKEY_OK"
-    assert recover_espia.llamadas == ["TEST_APIKEY_OK"]
+    assert _esta_encolada("TEST_APIKEY_OK")
 
 
 def test_crear_consulta_sin_api_key_configurada_sigue_abierta(recover_espia, monkeypatch):
@@ -987,7 +1071,7 @@ def test_crear_consulta_sin_api_key_configurada_sigue_abierta(recover_espia, mon
     response = client.post("/query", json=VALID_REQUEST)
 
     assert response.status_code == 202
-    assert recover_espia.llamadas == ["TEST_APIKEY_ABIERTA"]
+    assert _esta_encolada("TEST_APIKEY_ABIERTA")
 
 
 def test_restart_exige_api_key(con_api_key, recover_espia):
@@ -996,13 +1080,13 @@ def test_restart_exige_api_key(con_api_key, recover_espia):
 
     sin_clave = client.post("/query/TEST_APIKEY_RESTART/restart")
     assert sin_clave.status_code == 401
-    assert recover_espia.llamadas == []
+    assert _fila("TEST_APIKEY_RESTART")["estado"] == "error"
 
     con_clave = client.post(
         "/query/TEST_APIKEY_RESTART/restart", headers={"X-API-Key": CLAVE_DE_PRUEBA}
     )
     assert con_clave.status_code == 202
-    assert recover_espia.llamadas == ["TEST_APIKEY_RESTART"]
+    assert _esta_encolada("TEST_APIKEY_RESTART")
 
 
 def test_delete_exige_api_key(con_api_key):

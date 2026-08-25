@@ -39,7 +39,7 @@ There's no linter configured. `SECURITY.md` / `PRE_DEPLOYMENT_CHECKLIST.md` / `D
 ## Architecture
 
 ### Request lifecycle
-`main.py` (FastAPI routes) → `_validate_and_prepare_request()` (Pydantic + per-satellite business rules + disk-space/file-count limits) → `processors.py` (`HistoricQueryProcessor.procesar_request`, expands date ranges/hours into an internal query object) → `database.py` (`ConsultasDatabase`, SQLite persistence) → background task (`recover.procesar_consulta`, either the real recoverer or the simulator) → polled via `GET /query/{id}`.
+`main.py` (FastAPI routes) → `_validate_and_prepare_request()` (Pydantic + per-satellite business rules + disk-space/file-count limits) → `processors.py` (`HistoricQueryProcessor.procesar_request`, expands date ranges/hours into an internal query object) → `database.py` (`ConsultasDatabase`, SQLite persistence) → queued in `recibido` and picked up by `cola.BucleDeCola` (which calls `recover.procesar_consulta`, either the real recoverer or the simulator) → polled via `GET /query/{id}`.
 
 `consulta_id` is an 8-char random ID (`generar_id_consulta()`, `secrets.choice`), used as the SQLite PK — the same ID the caller (`historic_query`) generates/tracks on its side, sent as `id` in the request body or auto-generated here if absent.
 
@@ -53,23 +53,39 @@ Two module-level tuples in `main.py` are the single source of truth — use them
 state lists: `ESTADOS_EN_VUELO` (`recibido`, `procesando`) and `ESTADOS_REINICIABLES` (those plus
 `error`, `completado`).
 
-**Background tasks live in memory.** FastAPI's `BackgroundTasks` are lost whenever the process dies,
-so a query stays frozen in whatever state it had, forever — there is no startup rescue. This is not
-hypothetical: `GkpH6xne` sat at 89% for 29h in Aug-2026 because `historic-server` was restarted
-mid-download. Two consequences are wired into the code and should not be "simplified" away:
-- `POST /query/{id}/restart` accepts `recibido` precisely because that's where a never-started task
-  lands. It's the endpoint's whole reason to exist.
-- `DELETE /query/{id}?purge=true` returns **409** for anything in `ESTADOS_EN_VUELO` unless
-  `force=true`, since the task may start at any moment and recreate the directory just deleted.
-  `historic_query`'s admin reject button always sends `force=true` for this reason.
+**The queue owns the work, not the process.** Endpoints no longer start anything: `POST /query`
+just INSERTs, and `cola.BucleDeCola` — a thread started from `lifespan`, one per gunicorn worker —
+claims rows and runs the pipeline. This replaced `BackgroundTasks`, which lived in process memory
+and were lost on every restart, freezing queries forever (`GkpH6xne` sat at 89% for 29h in
+Aug-2026 for exactly that reason). See `PLAN_COLA_DURABLE.md`.
 
-`gunicorn -w 4` means workers share no memory, so two restart requests land on different processes
-and each queues its own task — this actually happened, with two workers downloading the same 2380
-files in parallel. `database.reclamar_para_reproceso()` is the lock: one conditional `UPDATE` that
-both resets the state and claims the query, so only one caller can see `rowcount == 1`. The lock
-signal is `timestamp_actualizacion`, which the pipeline already refreshes on every advance — a
-recent heartbeat means someone is really working, a stale one (older than `LATIDO_MAXIMO_S`, 900s)
-means the task died. `error`/`completado` are always claimable; they have no work in flight.
+Ownership is written in the row: `worker_id` plus `lease_hasta`, refreshed by `actualizar_estado`
+on every pipeline advance. A dead process stops refreshing, the lease expires, and any loop's
+`liberar_expiradas()` returns the query to `recibido`. **Recovery is the normal operation of the
+queue, not a special startup case** — so don't add a startup rescue, it already happens.
+
+Three things follow, and should not be "simplified" away:
+- `reclamar_siguiente()` is a single conditional `UPDATE ... RETURNING`, which is what makes it
+  safe for four gunicorn workers to each run a loop. Two of them once downloaded the same 2380
+  files in parallel; that's what this prevents. Covered by
+  `tests/test_cola.py::test_varios_workers_a_la_vez_no_se_pisan`.
+- `POST /query/{id}/restart` calls `reencolar()`, which **refuses (409) if the lease is live**.
+  Re-queueing a query someone is actively downloading would hand it to a second consumer writing
+  into the same directory. Two rapid restarts both return 202 now — that's fine and idempotent;
+  exclusion happens at the claim.
+- `DELETE /query/{id}?purge=true` returns **409** for anything in `ESTADOS_EN_VUELO` unless
+  `force=true`: a loop may claim a `recibido` query at any moment and recreate the directory just
+  deleted. `historic_query`'s admin reject button always sends `force=true` for this reason.
+
+The loop translates the pipeline's own `error` state into a retry decision (`fallar_con_reintento`,
+3 attempts, 1/5/15 min backoff via `disponible_desde`) — `recover.procesar_consulta` catches its
+own exceptions, so without that translation there would be no retries at all. On shutdown the loop
+deliberately does **not** release an in-progress query: it lets the lease expire, because releasing
+it while the pipeline is still writing invites a second writer.
+
+`/health` reports `cola.hilo_vivo` and the queue depth, and returns 503 if the thread is dead with
+work queued. That is the one failure mode invisible from outside: the API keeps answering 202 while
+nothing drains.
 
 ### Open work
 Tracked in `../historic_query/pendientes.md` §0-ter (the operational log lives in that repo).

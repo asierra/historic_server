@@ -46,8 +46,14 @@ class ConsultasDatabase:
     # Con WAL mode el único bloqueo posible es escritor-escritor; 30s es generoso.
     _CONNECT_TIMEOUT = 30
 
-    def __init__(self, db_path: str = DATABASE_PATH):
+    def __init__(self, db_path: str = DATABASE_PATH, lease_s: int = LEASE_POR_DEFECTO_S):
         self.db_path = db_path
+        # La duración del lease vive aquí, y no en cada llamada, porque quien
+        # lo renueva es `actualizar_estado` desde dentro del pipeline —que no
+        # conoce la configuración de la cola ni debería—. Si el valor fuera un
+        # argumento con defecto, el primer avance del pipeline pisaría el lease
+        # configurado con 900 s y bajar QUEUE_LEASE_S no serviría de nada.
+        self.lease_s = lease_s
         logger.info(f"📂 Inicializando base de datos en: {db_path}")
         self._init_db()
 
@@ -184,7 +190,7 @@ class ConsultasDatabase:
         estado: str,
         progreso: int = None,
         mensaje: str = None,
-        lease_s: int = LEASE_POR_DEFECTO_S,
+        lease_s: Optional[int] = None,
         ahora: Optional[datetime] = None,
     ):
         """Actualiza el estado de una consulta y, si sigue en curso, renueva el lease.
@@ -195,6 +201,7 @@ class ConsultasDatabase:
         """
         try:
             ahora = ahora or datetime.now()
+            lease_s = self.lease_s if lease_s is None else lease_s
             with self._connect() as conn:
                 query = """
                     UPDATE consultas 
@@ -267,67 +274,68 @@ class ConsultasDatabase:
             logging.error(f"Error obteniendo consulta: {e}")
             return None
     
-    def reclamar_para_reproceso(
-        self,
-        consulta_id: str,
-        estados_en_vuelo: tuple,
-        latido_maximo_s: int,
-        mensaje: str = "Consulta reenviada para procesamiento",
-    ) -> bool:
-        """Reclama una consulta para reprocesarla, en una sola operación atómica.
-
-        Devuelve True si esta llamada se quedó con la consulta, y False si otra
-        ya la tiene en vuelo. Sirve de cerrojo entre los workers de gunicorn, que
-        no comparten memoria: sin esto, dos peticiones repartidas a workers
-        distintos encolan cada una su propia tarea sobre el mismo consulta_id y
-        acaban descargando los mismos archivos por duplicado, pisándose entre sí.
-
-        El cerrojo es el propio `timestamp_actualizacion`: el pipeline lo refresca
-        con cada avance, así que un latido reciente significa que hay alguien
-        trabajando de verdad. Si está más viejo que `latido_maximo_s`, la tarea
-        murió (típicamente porque se reinició el servicio, que se lleva por
-        delante los BackgroundTasks) y la consulta puede reclamarse.
-
-        Los estados fuera de `estados_en_vuelo` (error, completado) no tienen
-        trabajo en curso: se reclaman siempre, sin mirar el latido.
-        """
-        try:
-            ahora = datetime.now()
-            umbral = (ahora - timedelta(seconds=latido_maximo_s)).isoformat()
-            marcadores = ",".join("?" for _ in estados_en_vuelo)
-            with self._connect() as conn:
-                # UPDATE condicional: SQLite lo resuelve en una transacción, así que
-                # de dos llamadas simultáneas solo una puede ver rowcount == 1.
-                cursor = conn.execute(
-                    f"""
-                    UPDATE consultas
-                       SET estado = 'recibido',
-                           progreso = 0,
-                           mensaje = ?,
-                           timestamp_actualizacion = ?
-                     WHERE id = ?
-                       AND (estado NOT IN ({marcadores})
-                            OR timestamp_actualizacion < ?)
-                    """,
-                    (mensaje, ahora.isoformat(), consulta_id, *estados_en_vuelo, umbral),
-                )
-                conn.commit()
-                return cursor.rowcount == 1
-        except Exception as e:
-            logging.error(f"Error reclamando consulta {consulta_id} para reproceso: {e}")
-            return False
-
     # ------------------------------------------------------------------
     # Primitivas de cola
     #
-    # Generalizan lo que reclamar_para_reproceso() ya hacía para una consulta
-    # concreta: un UPDATE condicional es un cerrojo atómico entre procesos que
-    # no comparten memoria. Aquí el cerrojo pasa a ser «coge la siguiente».
+    # Un UPDATE condicional es un cerrojo atómico entre procesos que no
+    # comparten memoria. Sustituyen a `reclamar_para_reproceso()`, que hacía
+    # eso mismo para una consulta concreta: aquí el cerrojo es «coge la
+    # siguiente», que además cubre a quien no pasó por /restart.
     #
     # Todos aceptan `ahora` inyectable: sin eso, probar leases y backoff exige
     # esperas reales, y esta suite ya ha tenido bastante con dos esperas de
     # margen justo.
     # ------------------------------------------------------------------
+
+    def hay_trabajo(self, ahora: Optional[datetime] = None) -> bool:
+        """¿Hay algo reclamable? Comprobación de sólo lectura.
+
+        El bucle la usa como filtro antes de intentar el reclamo. Sin ella,
+        cada tick de cada proceso abre una transacción de escritura aunque no
+        haya nada que hacer —cuatro procesos por doce ticks al minuto, unas
+        70 000 escrituras vacías al día— que hacen crecer el WAL para nada.
+        Con ella, la cola en reposo sólo se lee.
+
+        No es un cerrojo ni pretende serlo: entre esta lectura y el reclamo
+        otro puede llevarse la fila. Da igual, el reclamo ya es exclusivo y
+        devolver None es una respuesta válida.
+        """
+        try:
+            ahora = ahora or datetime.now()
+            with self._connect() as conn:
+                fila = conn.execute(
+                    """
+                    SELECT 1 FROM consultas
+                     WHERE estado = 'recibido'
+                       AND (disponible_desde IS NULL OR disponible_desde <= ?)
+                     LIMIT 1
+                    """,
+                    (ahora.isoformat(),),
+                ).fetchone()
+                return fila is not None
+        except Exception as e:
+            logging.error(f"Error comprobando si hay trabajo en la cola: {e}")
+            # Ante la duda, decir que sí: el reclamo lo resolverá y devolverá
+            # None. Decir que no dejaría la cola parada por un error transitorio.
+            return True
+
+    def contar_por_estado(self) -> Dict[str, int]:
+        """Cuántas consultas hay en cada estado. Lo usa /health.
+
+        Una cola que crece con los consumidores muertos es el modo de fallo
+        que no se ve desde fuera: la API sigue aceptando y respondiendo 202.
+        """
+        try:
+            with self._connect() as conn:
+                return {
+                    estado: n
+                    for estado, n in conn.execute(
+                        "SELECT estado, COUNT(*) FROM consultas GROUP BY estado"
+                    )
+                }
+        except Exception as e:
+            logging.error(f"Error contando consultas por estado: {e}")
+            return {}
 
     def reclamar_siguiente(
         self,
@@ -513,24 +521,37 @@ class ConsultasDatabase:
         self,
         consulta_id: str,
         mensaje: str = "Consulta reenviada para procesamiento",
+        forzar: bool = False,
         ahora: Optional[datetime] = None,
     ) -> bool:
-        """Devuelve una consulta al principio de la cola, venga del estado que venga.
+        """Devuelve una consulta al principio de la cola.
 
-        Es lo que usará POST /query/{id}/restart. No necesita cerrojo propio,
-        al revés que reclamar_para_reproceso(): dos reinicios simultáneos dejan
-        la misma fila en 'recibido' —la operación es idempotente— y de ahí sólo
-        puede sacarla un reclamo, que sí es exclusivo. El cerrojo se hereda de
-        la cola en vez de reimplementarse en el endpoint.
+        Es lo que usa POST /query/{id}/restart. Devuelve False si no existe o
+        si alguien la tiene con el lease vivo.
+
+        **Por qué mira el lease.** Dos reinicios simultáneos serían inocuos —la
+        operación es idempotente y de 'recibido' sólo saca un reclamo, que sí
+        es exclusivo—, pero reencolar una consulta que un consumidor está
+        descargando ahora mismo la pone a disposición de otro, y acabarían los
+        dos escribiendo en el mismo directorio. Es exactamente el duplicado que
+        `reclamar_para_reproceso()` existía para evitar, con el lease como
+        señal en vez del latido.
+
+        `forzar=True` se salta esa comprobación. Es para cuando se sabe que el
+        dueño ya no está, no para insistir.
 
         `intentos` se pone a cero: si una persona pide expresamente el
         reinicio, empieza con presupuesto entero y no con lo que quedara.
         """
         try:
             ahora = ahora or datetime.now()
+            condicion, extra = "", ()
+            if not forzar:
+                condicion = " AND (lease_hasta IS NULL OR lease_hasta < ?)"
+                extra = (ahora.isoformat(),)
             with self._connect() as conn:
                 cursor = conn.execute(
-                    """
+                    f"""
                     UPDATE consultas
                        SET estado = 'recibido',
                            progreso = 0,
@@ -540,9 +561,9 @@ class ConsultasDatabase:
                            lease_hasta = NULL,
                            disponible_desde = NULL,
                            timestamp_actualizacion = ?
-                     WHERE id = ?
+                     WHERE id = ?{condicion}
                     """,
-                    (mensaje, ahora.isoformat(), consulta_id),
+                    (mensaje, ahora.isoformat(), consulta_id, *extra),
                 )
                 conn.commit()
                 return cursor.rowcount == 1

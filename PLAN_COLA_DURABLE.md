@@ -6,8 +6,8 @@ cola con *leases*. Sin broker, sin estados nuevos, sin tocar `historic_query`.
 | | |
 |---|---|
 | **Rama base** | `fix/ci-y-timeouts` (`d6d64aa`) |
-| **Fecha** | 24-ago-2026 · entrega 1 implementada y §6 decidida el 25-ago |
-| **Estado** | **Entrega 1 hecha** (§4): esquema y primitivas, sin cambio de comportamiento, ya en `main`. **Entrega 2 pendiente**, y será de **un solo servicio**: §6 quedó decidida con datos de tahan. |
+| **Fecha** | 24-ago-2026 · entregas 1 y 2 implementadas el 25-ago |
+| **Estado** | **Hecho.** Entrega 1 (§4) y entrega 2 (§5) implementadas, con §6 decidida a favor de un solo servicio. Pendiente de desplegar en tahan (§7). |
 
 ---
 
@@ -236,8 +236,28 @@ Módulo nuevo `tests/test_cola.py`. Casos que fijan los invariantes:
 
 ## 5. Entrega 2 — el corte (un solo servicio)
 
-> Escrita para la variante decidida en §6. La versión de dos procesos —`worker.py` con su unidad
-> de systemd— está descartada; lo que sigue la sustituye.
+> **Hecha.** Escrita para la variante decidida en §6; la versión de dos procesos —`worker.py` con
+> su unidad de systemd— está descartada. Lo que sigue describe lo implementado.
+>
+> **Cinco desviaciones respecto a lo propuesto**, todas encontradas al implementar o al probar:
+>
+> 1. **El apagado no suelta la consulta en curso** (2.1-bis decía que sí). Soltarla la pondría a
+>    disposición de otro proceso de gunicorn mientras éste sigue escribiendo en el mismo
+>    directorio — el duplicado que se quiere evitar. Se deja vencer el lease: cuesta hasta un
+>    cuarto de hora y a cambio no puede haber dos escritores nunca.
+> 2. **`/restart` conserva su 409.** §2.2 decía que el cerrojo se heredaba de la cola y bastaba
+>    `reencolar()`. No basta: reencolar una consulta con el lease vivo se la entrega a un segundo
+>    consumidor. `reencolar()` mira el lease y se niega, con `forzar=True` como escape explícito.
+>    Lo que sí cambia: dos reinicios seguidos devuelven los dos 202, porque la exclusión está en
+>    el reclamo.
+> 3. **El bucle traduce el `error` del pipeline a una decisión de reintento.** No estaba previsto
+>    y sin ello no habría reintentos en absoluto: `recover.procesar_consulta` atrapa sus propias
+>    excepciones y deja `error`, así que el bucle nunca se enteraría de que algo falló.
+> 4. **`hay_trabajo()`, una comprobación de sólo lectura antes del reclamo.** Sin ella cada tick
+>    de cada proceso abre una transacción de escritura aunque no haya nada: unas 70 000
+>    escrituras vacías al día haciendo crecer el WAL para nada.
+> 5. **`QUEUE_POLL_S` y `QUEUE_LEASE_S` como configuración**, no constantes. Salió de intentar
+>    probar §7-4 en menos de quince minutos, y de ahí salieron además los dos fallos de abajo.
 
 ### 2.1 El bucle en el `lifespan`
 
@@ -299,7 +319,24 @@ Una cola que crece con todos los hilos muertos es el modo de fallo de esta varia
 
 **Verificación:** matar el hilo a mano y comprobar que `/health` lo reporta, en vez de callar.
 
-### 2.4 Documentación
+### 2.5 Dos fallos que sólo apareció el humo
+
+Ninguna prueba ejercita el `lifespan` —el `TestClient` de la suite se crea sin `with`—, así que
+hizo falta arrancar el servidor de verdad, matarlo con `kill -9` a media consulta y ver si se
+recuperaba. No se recuperaba, por dos motivos independientes:
+
+- **`actualizar_estado` renovaba el lease con su propio valor por defecto.** El pipeline la llama
+  sin pasar `lease_s` —no conoce la configuración de la cola ni debe conocerla—, así que el primer
+  avance pisaba el lease configurado con 900 s. La duración pasa a vivir en `ConsultasDatabase`,
+  que es quien la aplica.
+- **El barrido corría cada 60 s aunque el lease fuera de 20.** Bajar el lease no aceleraba nada y
+  el efecto era invisible: parecía que el lease no funcionaba. El intervalo pasa a ser
+  `min(60, lease/2)`, así que nunca se tarda más de lease y medio en recuperar.
+
+Los dos tienen prueba de regresión. La lección de método es que **la suite no cubre el arranque**,
+y cualquier cosa que se conecte en el `lifespan` hay que verla arrancar de verdad.
+
+### 2.6 Documentación
 
 - `CLAUDE.md` — la sección de arquitectura describe `BackgroundTasks` en memoria como un hecho
   central, y el bloque de estados explica `ESTADOS_EN_VUELO` y `/restart` a partir de eso. Hay
@@ -530,17 +567,17 @@ no esto—. Tampoco toca el pipeline: si una descarga es lenta, seguirá siéndo
 | 1.1 Migración | 2 archivos, aditivo | Bajo · patrón que ya existe |
 | 1.2 Primitivas | `database.py`, 5 métodos | Bajo · nadie las llama todavía |
 | 1.3 Pruebas | módulo nuevo | Ninguno |
-| 2.1 Bucle en el `lifespan` | `main.py` + apagado limpio | Medio · reusa el pipeline sin tocarlo |
+| 2.1 Bucle en el `lifespan` | `cola.py` nuevo + `main.py` | Medio · reusa el pipeline sin tocarlo |
 | 2.2 Podar `main.py` | 2 endpoints | Medio · es el corte |
 | 2.3 `/health` | endpoint | Bajo · pero es lo único que hace visible el fallo de 2.1 |
-| 2.4 Docs | 3 archivos | Ninguno |
+| 2.5 Humo | ninguno · verificación | Encontró dos fallos que la suite no veía |
+| 2.6 Docs | 3 archivos | Ninguno |
 
-**1.1 a 1.3 están hechas y en `main`** (`5b8fccc`), desplegables solas: no cambian el
-comportamiento. La 2 puede esperar a que haya hueco para vigilar el corte, y si nunca llega, la 1
-no estorba — son cuatro columnas sin usar.
+**Todo hecho.** Queda desplegarlo en tahan (§7), y ahí el paso que de verdad prueba el cambio es
+el 4: reiniciar a propósito con una descarga en curso. En local se hizo con `kill -9` y un lease
+de 20 s, y la consulta se completó sola 29 s después de arrancar.
 
 ---
 
-*Entrega 1 implementada y en `main` (`5b8fccc`), junto al arreglo del CI y la API key en
-`POST /query`. §6 decidida el 25-ago con datos de tahan: un solo servicio. La entrega 2 sigue
-siendo propuesta.*
+*Entregas 1 y 2 implementadas el 25-ago, con §6 decidida con datos de tahan: un solo servicio.
+Queda el despliegue de §7.*

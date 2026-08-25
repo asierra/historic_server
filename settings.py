@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     min_free_space_gb_buffer: int = Field(10, description="Safety buffer in GB to leave free on disk.")
     api_key: Optional[str] = Field(None, description="Optional API Key for securing the endpoints.")
 
+    # Cola durable (ver PLAN_COLA_DURABLE.md). Se exponen como configuración
+    # porque son las dos perillas que se querrán mover sin tocar código: el
+    # sondeo marca cuánto tarda en arrancar una consulta recién enviada, y el
+    # lease cuánto se tarda en recuperar el trabajo de un proceso que murió.
+    queue_poll_s: float = Field(5.0, gt=0, description="Seconds between queue polls by each consumer.")
+    queue_lease_s: int = Field(900, gt=0, description="How long a claim is valid before another consumer may take over.")
+
     # S3 / GOES operational settings
     goes19_operational_date: str = Field(
         "2025-04-01",

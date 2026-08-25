@@ -196,6 +196,25 @@ def test_actualizar_estado_empuja_el_lease(db):
     assert db.liberar_expiradas(ahora=T0 + timedelta(seconds=901)) == 0
 
 
+def test_el_pipeline_renueva_con_el_lease_configurado(db, tmp_path):
+    """`actualizar_estado` usa el lease de la base, no un valor por defecto suyo.
+
+    Regresión. El pipeline llama a `actualizar_estado` sin pasar `lease_s`
+    —no conoce la configuración de la cola ni debe conocerla—, así que si el
+    valor por defecto fuera fijo, el primer avance pisaría el lease configurado
+    con 900 s y bajar QUEUE_LEASE_S no serviría de nada. Se vio matando el
+    servidor a media consulta: con lease de 20 s no se recuperaba nunca.
+    """
+    corta = ConsultasDatabase(str(tmp_path / "corta.db"), lease_s=30)
+    assert corta.crear_consulta("CONFIGUR", {"x": 1})
+    corta.reclamar_siguiente("w1", ahora=T0)
+
+    corta.actualizar_estado("CONFIGUR", "procesando", progreso=50, ahora=T0)
+
+    fila = _fila(corta, "CONFIGUR")
+    assert fila["lease_hasta"] == (T0 + timedelta(seconds=30)).isoformat()
+
+
 def test_un_estado_terminal_no_renueva_el_lease(db):
     """Sólo 'procesando' retiene: en 'completado' el lease no significa nada."""
     _encolar(db, "TERMINAD")
@@ -320,12 +339,14 @@ def test_fallar_una_consulta_inexistente_no_revienta(db):
 def test_reencolar_devuelve_a_la_cola_desde_cualquier_estado(db):
     """El botón de reiniciar del panel funciona igual sobre error que sobre completado."""
     for consulta_id, estado in [("DESDEERR", "error"), ("DESDEOK1", "completado")]:
-        # Se parte de una fila sucia a propósito: con dueño, con lease y con un
-        # reintento aplazado. Si sólo se comprobara sobre campos ya vacíos, la
-        # prueba pasaría aunque reencolar() no limpiara nada.
+        # Se parte de una fila sucia a propósito: con dueño, con lease vencido
+        # y con un reintento aplazado. Si sólo se comprobara sobre campos ya
+        # vacíos, la prueba pasaría aunque reencolar() no limpiara nada.
+        # El lease va vencido y no vivo porque un lease vivo lo rechaza el
+        # cerrojo — eso lo cubre test_reencolar_se_niega_si_alguien_la_tiene_viva.
         _encolar(db, consulta_id, estado=estado, progreso=100, intentos=3,
                  worker_id="tahan:4242",
-                 lease_hasta=(T0 + timedelta(hours=1)).isoformat(),
+                 lease_hasta=(T0 - timedelta(hours=1)).isoformat(),
                  disponible_desde=(T0 + timedelta(days=1)).isoformat())
 
         assert db.reencolar(consulta_id, ahora=T0) is True
@@ -341,6 +362,33 @@ def test_reencolar_devuelve_a_la_cola_desde_cualquier_estado(db):
         assert fila["lease_hasta"] is None
         assert fila["disponible_desde"] is None
         assert db.reclamar_siguiente("w1", LEASE, ahora=T0)[0] == consulta_id
+
+
+def test_reencolar_se_niega_si_alguien_la_tiene_viva(db):
+    """No se le quita el trabajo a un consumidor que está avanzando.
+
+    Reencolar una consulta con el lease vivo la pondría a disposición de otro,
+    y acabarían los dos escribiendo en el mismo directorio. Es el duplicado que
+    costó descargar 2380 archivos por partida doble en agosto.
+    """
+    _encolar(db, "TRABAJAN")
+    db.reclamar_siguiente("w1", lease_s=900, ahora=T0)
+
+    assert db.reencolar("TRABAJAN", ahora=T0 + timedelta(seconds=60)) is False
+    assert _fila(db, "TRABAJAN")["estado"] == "procesando"
+
+    # En cuanto el lease vence, sí
+    assert db.reencolar("TRABAJAN", ahora=T0 + timedelta(seconds=901)) is True
+    assert _fila(db, "TRABAJAN")["estado"] == "recibido"
+
+
+def test_reencolar_forzado_se_salta_el_lease(db):
+    """El escape explícito, para cuando se sabe que el dueño ya no está."""
+    _encolar(db, "FORZADA1")
+    db.reclamar_siguiente("w1", lease_s=900, ahora=T0)
+
+    assert db.reencolar("FORZADA1", forzar=True, ahora=T0) is True
+    assert _fila(db, "FORZADA1")["estado"] == "recibido"
 
 
 def test_reencolar_dos_veces_es_inocuo(db):
