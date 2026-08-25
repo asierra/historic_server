@@ -6,8 +6,8 @@ cola con *leases*. Sin broker, sin estados nuevos, sin tocar `historic_query`.
 | | |
 |---|---|
 | **Rama base** | `fix/ci-y-timeouts` (`d6d64aa`) |
-| **Fecha** | 24-ago-2026 · entrega 1 implementada el 25-ago |
-| **Estado** | **Entrega 1 hecha** (§4): esquema y primitivas, sin cambio de comportamiento, desplegable sola. **Entrega 2 aplazada** el 25-ago a falta de dos números de tahan (§6). |
+| **Fecha** | 24-ago-2026 · entrega 1 implementada y §6 decidida el 25-ago |
+| **Estado** | **Entrega 1 hecha** (§4): esquema y primitivas, sin cambio de comportamiento, ya en `main`. **Entrega 2 pendiente**, y será de **un solo servicio**: §6 quedó decidida con datos de tahan. |
 
 ---
 
@@ -42,42 +42,46 @@ el mismo defecto visto desde tres ángulos:
 
 ## 2. La tesis
 
-Persistir la cola no basta si el trabajo sigue viviendo dentro de la API. El cambio de fondo es
-**separar los dos procesos**: la API escribe filas, un worker aparte las consume.
+Persistir la cola no basta si nadie apunta **quién** tiene cada consulta. El cambio de fondo es
+que la propiedad del trabajo se escriba en la fila: quién la tiene y hasta cuándo. Con eso, que
+un proceso muera deja de ser un evento especial —es sólo un lease que nadie renueva— y la
+recuperación deja de depender de que una persona se dé cuenta y pulse un botón.
 
 ```
-HOY · un proceso                    DESPUÉS · dos unidades
-┌─────────────────────────┐         ┌─────────────────────────┐
-│ gunicorn -w 4           │         │ historic-server         │
-│ sirve HTTP + descarga   │         │ sirve HTTP · INSERT y ya│
-└─────────────────────────┘         └─────────────────────────┘
-          ↓ reiniciar                ┌─────────────────────────┐
-┌─────────────────────────┐         │ historic-worker         │
-│ trabajo perdido         │         │ reclama · procesa       │
-│ fila congelada sin dueño│         └─────────────────────────┘
-└─────────────────────────┘                   ↓ reiniciar la API
-                                     el worker sigue descargando
+HOY · el trabajo vive en memoria       DESPUÉS · el trabajo vive en la fila
+┌──────────────────────────────┐       ┌──────────────────────────────┐
+│ gunicorn -w 4                │       │ gunicorn -w 4                │
+│ HTTP + BackgroundTasks       │       │ HTTP + bucle de cola         │
+└──────────────────────────────┘       └──────────────────────────────┘
+          ↓ reiniciar                            ↓ reiniciar
+┌──────────────────────────────┐       ┌──────────────────────────────┐
+│ trabajo perdido              │       │ el lease vence, otro la coge │
+│ fila congelada, sin dueño    │       │ ≤15 min y sigue sola         │
+│ hasta que alguien lo note    │       │ sin que nadie intervenga     │
+└──────────────────────────────┘       └──────────────────────────────┘
 ```
 
 Lo que se gana, en orden de importancia real:
 
-1. **Desplegar la API deja de tocar el trabajo en curso.** Hoy cualquier `systemctl restart
-   historic-server` es una decisión operativa con consecuencias; después es rutina.
-2. ~~**El worker se puede parar solo.** Durante la fuga de 1.1 TB del 19-ago se habrían podido
-   frenar las descargas sin tirar la API ni perder estado.~~ ❌ **Falso, corregido el 25-ago.**
-   La bitácora dice que aquel día no había nada en vuelo —«las 35 filas del QueryProcessor en
-   `completado`»— y la fuga era de punteros perdidos, no de descargas desbocadas: parar el worker
-   no habría servido de nada. No hay ningún incidente registrado que pidiera esta capacidad.
-3. **Escala por unidades, no por `-w`.** Hoy subir `-w` sube las dos cosas a la vez y multiplica
-   el riesgo de duplicados.
-4. **La ventana de corte es segura por construcción.** Entre desplegar la API nueva y arrancar
-   el worker, las consultas se acumulan en `recibido` sin perderse. Eso es exactamente lo que
-   hoy no pasa.
+1. **Una consulta deja de poder quedarse congelada para siempre.** Es el defecto que originó
+   todo esto: `GkpH6xne`, 29 horas al 89 %, esperando a que una persona lo viera.
+2. **El chequeo manual antes de cada despliegue desaparece.** Hoy hay que mirar si queda algo en
+   `recibido`/`procesando` antes de reiniciar tahan, y acordarse de hacerlo. Con leases da igual:
+   lo que se corte se reanuda solo.
+3. **Un fallo deja de ser terminal o eterno.** `intentos` con tope y `disponible_desde` con
+   backoff: se reintenta unas cuantas veces con espera y luego para, en vez de no reintentar
+   nunca (hoy) o girar sin fin.
+4. **Un solo camino por el que arranca trabajo.** Todo pasa por `reclamar_siguiente()`, así que
+   no hay dos productores de tareas que mantener en sintonía.
 
 **No es sólo añadir.** `background_tasks.add_task` sale de los dos endpoints.
 `reclamar_para_reproceso()` se disuelve en el reclamo genérico. `/restart` se vuelve «pon
-`recibido`, limpia el lease». El `ProcessPool` sale del `lifespan` de la API. La estimación es
-que `main.py` sale en negativo neto de líneas.
+`recibido`, limpia el lease». La estimación es que `main.py` sale en negativo neto de líneas.
+
+> **Lo que la tesis ya no dice.** Hasta el 25-ago esta sección defendía **separar la API del
+> worker en dos procesos**. Se evaluó con datos de tahan y se descartó (§6): compraba media hora
+> al año a cambio de una unidad de systemd con precedente de fallo silencioso. La cola se queda;
+> el corte en dos, no.
 
 ---
 
@@ -230,81 +234,88 @@ Módulo nuevo `tests/test_cola.py`. Casos que fijan los invariantes:
 
 ---
 
-## 5. Entrega 2 — el corte
+## 5. Entrega 2 — el corte (un solo servicio)
 
-### 2.1 `worker.py`
+> Escrita para la variante decidida en §6. La versión de dos procesos —`worker.py` con su unidad
+> de systemd— está descartada; lo que sigue la sustituye.
 
-Proceso propio, sin FastAPI. Construye `ConsultasDatabase`, el `ProcessPool` y `RecoverFiles`
-con la misma configuración de `settings.py`, y entra en bucle:
+### 2.1 El bucle en el `lifespan`
+
+Un hilo por proceso de gunicorn, arrancado desde el `lifespan` que ya existe. Reutiliza el
+`ConsultasDatabase`, el `ProcessPool` y el `RecoverFiles` que la API ya construye ahí, así que no
+hay configuración nueva ni un segundo sitio donde ajustar `MAX_WORKERS`.
 
 1. `liberar_expiradas()`
 2. `reclamar_siguiente()`; si no hay nada, dormir `POLL_S` (5 s) y repetir
 3. Procesar con `recover.procesar_consulta(id, query)` — el pipeline no se toca
 4. Si lanza excepción, `fallar_con_reintento()`
-5. Registrar latido de salud (2.4)
 
-Apagado limpio con `SIGTERM`: termina la consulta en curso o suelta el lease, cierra el
-`ProcessPool`. Como el lease caduca solo, incluso un `SIGKILL` se recupera sin intervención.
+**Un hilo, no un `asyncio.Task`.** El pipeline es bloqueante de principio a fin (`ProcessPool`,
+I/O de disco, `boto3`), así que dentro del bucle de eventos ahogaría a uvicorn. Va en un
+`threading.Thread(daemon=True)` con un `threading.Event` para el apagado.
 
-**Verificación:** prueba de integración con el simulador, y una consulta real de punta a punta
-en tren2 antes de tocar tahan.
+**Cuatro bucles, uno por worker de gunicorn.** Es seguro por el mismo `UPDATE` atómico de §3.2 —
+lo cubre `test_varios_workers_a_la_vez_no_se_pisan`— y **no es una regresión de concurrencia**:
+hoy ya puede haber cuatro descargas a la vez, porque cada `POST` lanza su `BackgroundTask` en el
+worker que lo atienda. Lo único nuevo es que la cola drena sola, así que un primer arranque con
+cola acumulada sacaría cuatro de golpe; lo acota la decisión de §8 sobre lo muy viejo.
+
+**Verificación:** prueba de integración con el simulador —encolar sin `add_task` y comprobar que
+el bucle la termina—, y una consulta real de punta a punta en tren2 antes de tocar tahan.
+
+### 2.1-bis Apagado limpio
+
+En el cierre del `lifespan`: señalar el `Event`, esperar un margen corto a que el bucle suelte la
+consulta en curso con `reencolar()`, y seguir. No hay que apurar: si el margen no basta, o si
+llega un `SIGKILL`, el lease caduca solo y otro la recoge. Es toda la gracia de tener custodia
+escrita en la fila en vez de en memoria.
+
+Lo que **sí** hay que respetar es el orden — soltar el lease antes de cerrar el `ProcessPool`,
+para no dejar una consulta reclamada por un proceso que ya no puede avanzarla.
 
 ### 2.2 Podar `main.py`
 
 - `POST /query` — quitar `background_tasks.add_task`; el `INSERT` ya deja la consulta encolada.
 - `POST /query/{id}/restart` — `reclamar_para_reproceso()` → `reencolar()`; el cerrojo lo hereda
   de la cola.
-- `lifespan` — fuera el `ProcessPool` y `RecoverFiles`; la API ya no procesa nada.
+- `lifespan` — el `ProcessPool` y `RecoverFiles` **se quedan**: los usa el bucle. Lo que se
+  añade es arrancar el hilo y pararlo.
 - `BackgroundTasks` desaparece de los *imports* y de las dos firmas.
 
-Lo que **no** cambia: el 409 del purge sigue haciendo falta, porque el worker puede estar
-escribiendo en ese directorio ahora mismo. Y `ESTADOS_EN_VUELO` se queda como está.
+Lo que **no** cambia: el 409 del purge sigue haciendo falta —el bucle puede estar escribiendo en
+ese directorio ahora mismo, esté en el mismo proceso o no— y `ESTADOS_EN_VUELO` se queda como
+está. `server.sh` tampoco cambia: sigue habiendo un solo proceso que matar.
 
-### 2.3 `historic-worker.service`
+### 2.3 Que `/health` no empeore
 
-Mismo `User`, mismo `EnvironmentFile`, mismo `WorkingDirectory` que `historic-server.service`.
-`Restart=always`. `ExecStart` apuntando a `/opt/historic_server/.venv/bin/python worker.py`.
+El circuit breaker de S3 es un singleton de módulo, y hoy `/health` ya miente a medias: cada uno
+de los 4 workers de gunicorn tiene el suyo y se enseña el del que conteste. Con el bucle en el
+mismo proceso eso no empeora —el breaker sigue donde está—, pero conviene añadir a `/health` lo
+que ahora sí se puede saber: si el hilo de la cola está vivo, y cuántas consultas hay en
+`recibido` y en `procesando`.
 
-> ⚠️ **La trampa ya conocida.** Los units de `tempoftp` en el repo apuntaban a
-> `/opt/tempoftp/venv`, que no existe —el entorno es `.venv` en los tres repos—, y fallaban con
-> `203/EXEC` todos los días sin que nadie mirara ese journal. Este unit hay que **arrancarlo y
-> leer el journal**, no darlo por bueno porque el archivo existe.
+Una cola que crece con todos los hilos muertos es el modo de fallo de esta variante, y es el
+único que no se ve desde fuera: la API responde 202 tan contenta.
 
-`server.sh` también queda desfasado: su `pkill -9 -f "gunicorn.*$APP"` no toca el worker, así
-que un `restart` por esa vía dejaría el worker huérfano y la API nueva. O aprende a gestionar
-las dos unidades, o se retira en favor de systemd.
+**Verificación:** matar el hilo a mano y comprobar que `/health` lo reporta, en vez de callar.
 
-**Verificación:** `systemctl start` + `journalctl -u historic-worker -f` mostrando el primer
-tick, y un `systemctl restart historic-server` con una descarga en curso que **no** se
-interrumpe.
-
-### 2.4 Que `/health` deje de mentir
-
-El circuit breaker de S3 es un singleton de módulo. Si el trabajo de S3 se muda al worker, el de
-la API queda siempre inmaculado y `/health` informa de un componente que ya no hace nada.
-
-Tabla pequeña `salud_worker(worker_id PK, timestamp, cb_estado, cb_fallos, consulta_en_curso)`
-que el worker escribe en cada tick y `/health` lee. De paso arregla algo que *ya* es medio
-mentira: hoy cada uno de los 4 workers de gunicorn tiene su propio breaker y `/health` enseña el
-del que conteste.
-
-**Verificación:** parar el worker y comprobar que `/health` lo reporta como ausente en vez de
-callar.
-
-### 2.5 Documentación
+### 2.4 Documentación
 
 - `CLAUDE.md` — la sección de arquitectura describe `BackgroundTasks` en memoria como un hecho
-  central; hay que reescribirla.
-- `README.md` — despliegue con dos unidades; `/restart` cambia de significado.
-- `DEPLOYMENT_GUIDE.md` y `FILESYSTEM_LAYOUT.md` — el worker es un proceso más con acceso de
-  escritura a `DOWNLOAD_PATH`.
+  central, y el bloque de estados explica `ESTADOS_EN_VUELO` y `/restart` a partir de eso. Hay
+  que reescribir ambos.
+- `README.md` — `/restart` cambia de significado: ya no reencola *y* lanza, sólo reencola.
+- `DEPLOYMENT_GUIDE.md` — no hay unidad nueva, pero sí un paso nuevo: `migrate_db.py`.
 
 ---
 
-## 6. Un servicio o dos
+## 6. Un servicio o dos — **decidido: uno**
 
-La entrega 2 se puede hacer de dos formas, y conviene saberlo antes de empezar. Lo que cambia es
-**quién corre el bucle**, no la cola.
+> **Decidido el 25-ago-2026 con datos de tahan.** El bucle vive en el proceso de la API. No hay
+> `worker.py` ni unidad nueva. Lo que sigue conserva el razonamiento y los números, porque la
+> decisión se puede revisar y entonces conviene saber sobre qué se tomó.
+
+Lo que estaba en juego era **quién corre el bucle**, no la cola.
 
 La variante de un solo servicio deja el bucle dentro del proceso de la API, en un hilo lanzado
 desde el `lifespan`. Funciona porque el lease no sabe ni le importa quién consume: los 4 workers
@@ -327,8 +338,8 @@ bien el 19-ago.
 
 ### Evaluación del 25-ago (con la entrega 1 ya hecha)
 
-**Resultado: aplazada.** Se despliega la entrega 1 sola y se decide la 2 más adelante, con datos
-reales de tahan. La recomendación sobre la mesa es **un servicio**, por lo que sigue.
+**Resultado: un servicio.** Lo que sigue es el razonamiento; los números de tahan que lo
+cerraron están al final.
 
 Lo que cambió respecto a la tabla de arriba, ahora que la cola existe:
 
@@ -356,54 +367,49 @@ Lo que cambió respecto a la tabla de arriba, ahora que la cola existe:
 0, 7. Tras la construcción inicial, meses enteros en silencio y luego racimos, que además caen
 donde peor vienen: los siete de agosto son todos de la ventana de incidencias.
 
-**Qué falta para cerrarla.** No hay base de producción en bucéfalo, así que estos dos números
-quedaron sin medir y son los que decidirían:
+### Los números de tahan (25-ago), que cerraron la decisión
 
-```bash
-# En tahan · cuántas veces un reinicio pilló trabajo en vuelo
-journalctl -u historic-server --since "6 months ago" | grep -c "Stopping historic-server"
+**Reinicios: 4 en 6 meses.** Unos 8 al año. El dato que importa no es ése sino que **uno de esos
+cuatro fue el que congeló a `GkpH6xne`**: una colisión de cada cuatro reinicios, pero del orden
+de dos consultas congeladas al año en términos absolutos.
 
-# En tahan · cuánto duran las consultas de verdad (creación → última actualización)
-sqlite3 /var/lib/historic_server/consultas_goes.db \
-  "SELECT id, estado, ROUND((julianday(timestamp_actualizacion)
-   - julianday(timestamp_creacion)) * 24, 2) AS horas
-     FROM consultas ORDER BY horas DESC LIMIT 20;"
-```
+**Duraciones: la muestra no sirve, y saberlo es parte del resultado.** Las seis filas que quedan
+en tahan son todas de menos de dos minutos, pero son las que *sobrevivieron*: la purga del 24-ago
+se llevó las seis grandes de la estudiante (34 657 archivos, 1.1 TB entre las seis) y `GkpH6xne`
+se borró el 19-ago. La tabla perdió exactamente las consultas largas, que son las únicas que un
+reinicio puede pillar. La magnitud real la da la bitácora: `GkpH6xne` llevaba 1073 archivos y
+20 GB sin haber llegado a la mitad, o sea horas.
 
-Si los despliegues resultan ser mucho más frecuentes de lo que sugieren los commits, o si alguna
-vez hubo ganas de frenar las descargas sin tirar la API, la recomendación se invierte.
+**La cuenta.** Dos servicios ahorrarían ≤15 min de reanudación unas dos veces al año —media hora
+anual— a cambio de una unidad de systemd cuyo modo de fallo silencioso tiene precedente
+demostrado en esta misma máquina. No se sostiene. Y lo que sí importaba —la consulta congelada
+para siempre, y tener que darse cuenta a mano— lo arregla la cola en las dos variantes por igual.
 
-> **Esta decisión no bloquea nada.** La entrega 1 es idéntica en los dos caminos. Las cuatro
-> columnas, el reclamo, los leases, los reintentos y sus pruebas no cambian ni una línea según
-> quién corra el bucle. Sólo cambia la entrega 2: un `worker.py` con su unit (2.1 y 2.3), o unas
-> veinte líneas en el `lifespan`. Se puede decidir cuando la 1 esté hecha, y cambiar de idea
-> después sin rehacer nada.
+**Qué invertiría la decisión:** que los despliegues pasen a ser frecuentes, que aparezca la
+necesidad real de frenar las descargas sin tirar la API, o que una sola máquina deje de dar
+abasto. Ninguna de las tres está cerca hoy.
 
-**Si se elige un solo servicio:**
+> **La decisión no costó nada aplazarla, y tampoco costaría revertirla.** La entrega 1 es
+> idéntica en los dos caminos: las cuatro columnas, el reclamo, los leases, los reintentos y sus
+> pruebas no cambian ni una línea según quién corra el bucle. Si algún día hay que volver a los
+> dos procesos, es sacar el bucle de §5 a un `worker.py` y escribir su unidad — nada de lo ya
+> hecho se rehace.
 
-- Los pasos 2.1 y 2.3 se sustituyen por el hilo en el `lifespan` y su apagado limpio.
-- 2.2 (podar `main.py`) se queda, salvo que el `ProcessPool` no se va: lo sigue necesitando el
-  bucle.
-- 2.4 se simplifica: el breaker vive en el mismo proceso que responde `/health`, aunque sigue
-  habiendo cuatro copias, una por worker de gunicorn.
-- §7 (despliegue) se queda en un solo corte: desplegar y reiniciar. Se pierde la ventana segura,
-  pero también deja de hacer falta.
-
-**Si se eligen dos**, importa qué primitiva de systemd se usa para enlazarlos, porque es fácil
-elegir la que destruye el beneficio:
+**Si alguna vez se vuelve a dos servicios**, hay un detalle de systemd que es fácil errar y que
+destruiría el beneficio entero:
 
 - `Wants=historic-worker.service` en la API — arrancar la API arranca el worker, y **reiniciar
   la API no reinicia el worker**. Es la correcta.
-- `PartOf=` o `BindsTo=` — reiniciar la API reinicia el worker. Es justo lo que estamos
-  evitando; con eso, el plan entero no sirve de nada.
+- `PartOf=` o `BindsTo=` — reiniciar la API reinicia el worker, que es justo lo que se estaría
+  intentando evitar.
 
-Con ambas `enable`, un reinicio de máquina las levanta sin intervención, y el despliegue de
-código sigue siendo uno: mismo `/opt/historic_server`, mismo `.venv`, un `git pull`.
+Y `server.sh` quedaría desfasado: su `pkill -9 -f "gunicorn.*$APP"` no tocaría al worker, así que
+un `restart` por esa vía dejaría el worker huérfano con la API nueva.
 
 > **No confundir con lo descartado en §10.** Lo que se descarta ahí es un *rescate* dentro del
-> `lifespan` **sin cola**: un barrido que reencola huérfanas y ya. Esta variante es la cola
+> `lifespan` **sin cola**: un barrido que reencola huérfanas y ya. Lo decidido aquí es la cola
 > completa —leases, reintentos, backoff, una sola fuente de verdad— y sólo comparte con aquélla
-> el sitio donde corre.
+> el sitio donde corre. La diferencia está desarrollada en §10.
 
 ---
 
@@ -414,21 +420,22 @@ comportamiento: respaldo del `.db` (`sqlite3 .backup` + gzip, como el cron), `mi
 desplegar el código. Nadie llama todavía a las primitivas nuevas, así que revertir es un `git
 checkout`: las cuatro columnas se quedan sin usar y no estorban.
 
-Lo que sigue es el corte de la entrega 2, pendiente.
+### El corte de la entrega 2
 
-### Variante de dos servicios
-
-El orden importa, y la propiedad que lo hace seguro es que **una consulta encolada no se pierde
-aunque nadie la procese todavía**.
+Con un solo servicio es un despliegue normal: desplegar y reiniciar. La propiedad que lo hace
+seguro es que **una consulta encolada no se pierde aunque nadie la procese todavía**, así que la
+ventana entre el reinicio y el primer tick del bucle no tiene consecuencias.
 
 | # | Paso | Si sale mal |
 |---|---|---|
 | 1 | Respaldo del `.db` (`sqlite3 .backup` + gzip, como el cron) | — |
-| 2 | Correr `migrate_db.py`. La API vieja sigue corriendo y no ve las columnas nuevas | Restaurar el respaldo; nada más ha cambiado |
-| 3 | Esperar a que no haya nada en vuelo, o dejar que termine | — |
-| 4 | Desplegar la API nueva y reiniciarla. Las consultas nuevas se acumulan en `recibido` | Revertir el código; las filas encoladas las recoge el `/restart` de siempre |
-| 5 | Instalar y arrancar `historic-worker`. Vacía la cola acumulada | Parar el worker: las filas vuelven a `recibido` solas al vencer el lease |
-| 6 | Verificar en el journal un ciclo completo, y reiniciar la API a propósito con una descarga en curso | — |
+| 2 | Desplegar y reiniciar. Lo que hubiera en vuelo se corta, y el bucle lo recoge al vencer su lease | Revertir el código y reiniciar; las filas encoladas las recoge el `/restart` de siempre |
+| 3 | Verificar en el journal un ciclo completo: liberación, reclamo, avance, `completado` | — |
+| 4 | Reiniciar a propósito con una descarga en curso, y comprobar que **se reanuda sola** en ≤ un lease | Es el criterio de aceptación de toda la entrega; si no pasa, no está hecha |
+
+El paso 4 es el que de verdad prueba el cambio. Conviene hacerlo con una consulta que tarde lo
+bastante para dar tiempo a reiniciar a mitad — y ahí las de tahan de menos de dos minutos no
+sirven: hace falta uno de los rangos grandes.
 
 > **Dos instancias.** Hay `historic-server` en tahan (`172.16.0.9:9041`) y en tren2
 > (`172.16.1.101:9041`), con el traslado de `QUERY_PROCESSOR_URL` aún pendiente. **Tren2 es el
@@ -487,11 +494,11 @@ medio.
 
 | Riesgo | Mitigación |
 |---|---|
-| Dos unidades donde había una: más superficie de despliegue, y un worker caído es silencioso | El latido de `salud_worker` en `/health` (2.4) lo hace visible; `Restart=always` lo levanta |
-| El unit nuevo repite la trampa del `venv` inexistente | Arrancar y leer el journal como parte del paso, no después |
-| Escritura concurrente sobre SQLite desde dos procesos | WAL ya está activo y el `timeout` de conexión es 30 s; el volumen es de unas pocas consultas al día |
-| Una consulta que tumba al worker una y otra vez | `intentos` con tope la manda a `error` en vez de dejarla girando |
-| `server.sh` deja de servir y nadie lo nota | Se adapta o se retira en 2.3, no se deja a medias |
+| **Los hilos mueren y la cola crece en silencio.** Es el modo de fallo propio de esta variante: la API sigue aceptando y respondiendo 202 | `/health` expone si el hilo vive y cuánto hay encolado (2.3). Sin eso, no se ve desde fuera |
+| Un hilo bloqueante conviviendo con uvicorn en el mismo proceso | El trabajo pesado ya está en el `ProcessPool`; el hilo sólo orquesta. Aun así hay que medir la latencia de `GET /query/{id}` con una descarga en curso |
+| Escritura concurrente sobre SQLite desde cuatro procesos | WAL ya está activo y el `timeout` de conexión es 30 s; el volumen es de unas pocas consultas al día. Lo cubre `test_varios_workers_a_la_vez_no_se_pisan` |
+| Una consulta que tumba al proceso una y otra vez | `intentos` con tope la manda a `error` en vez de dejarla girando — y cuenta en el reclamo, así que también atrapa las que mueren sin poder registrar nada |
+| Al arrancar con cola acumulada salen cuatro de golpe | La decisión de §8 sobre lo muy viejo acota qué entra; conviene desplegar con la cola vacía la primera vez |
 
 **Lo que no arregla:** sigue habiendo una sola máquina procesando; no hay prioridades ni cuotas
 por usuario; y la cola no sobrevive a que se pierda el archivo `.db` —eso lo cubre el respaldo,
@@ -506,7 +513,8 @@ no esto—. Tampoco toca el pipeline: si una descarga es lenta, seguirá siéndo
 | Celery o RQ con Redis | Un broker más que puede estar caído sin que nadie mire, y el estado del trabajo vive fuera de `consultas`. Con un cliente y unas pocas consultas al día no aporta nada. |
 | huey con `SqliteHuey` | Más ligero, mismo defecto de fondo: sus tablas son un segundo sitio donde un trabajo puede existir sin fila, o una fila sin trabajo. |
 | Timer de systemd con un comando *oneshot* | Sin leases ni control de concurrencia, y encaja mal con trabajos de horas. |
-| Rescate al arranque dentro del `lifespan`, **sin cola** | Es una red debajo del defecto, no el defecto. Deja intacto lo que más molesta: que desplegar la API mate las descargas. (No confundir con la variante de §6.) |
+| **Dos procesos**: la API encola, un `worker.py` con su unidad consume | Evaluado con datos el 25-ago y descartado: ahorra media hora al año a cambio de una unidad de systemd con precedente de fallo silencioso en esta misma máquina. El razonamiento completo y los números están en §6. |
+| Rescate al arranque dentro del `lifespan`, **sin cola** | Corre en el mismo sitio que lo decidido en §6, y ahí acaba el parecido. No apunta quién tiene cada consulta, así que si el proceso vuelve a morir se está igual y sólo salva el *siguiente* arranque; no cuenta intentos, así que una consulta que reviente el proceso se reencola en cada arranque —con `Restart=always`, un bucle que se alimenta solo—; no espera entre reintentos; y deja dos caminos por los que arranca trabajo en vez de uno. |
 
 > **El argumento decisivo: una sola fuente de verdad.** `reconcile_downloads`,
 > `tools/get_query.py` y el panel de Django ya leen la tabla `consultas`. Cualquier broker crea
@@ -522,17 +530,17 @@ no esto—. Tampoco toca el pipeline: si una descarga es lenta, seguirá siéndo
 | 1.1 Migración | 2 archivos, aditivo | Bajo · patrón que ya existe |
 | 1.2 Primitivas | `database.py`, 5 métodos | Bajo · nadie las llama todavía |
 | 1.3 Pruebas | módulo nuevo | Ninguno |
-| 2.1 `worker.py` | archivo nuevo | Medio · reusa el pipeline entero sin tocarlo |
-| 2.2 Podar `main.py` | 2 endpoints + lifespan | Medio · es el corte |
-| 2.3 Unit | archivo nuevo + `server.sh` | Medio · trampas de despliegue conocidas |
-| 2.4 `/health` | tabla + endpoint | Bajo |
-| 2.5 Docs | 4 archivos | Ninguno |
+| 2.1 Bucle en el `lifespan` | `main.py` + apagado limpio | Medio · reusa el pipeline sin tocarlo |
+| 2.2 Podar `main.py` | 2 endpoints | Medio · es el corte |
+| 2.3 `/health` | endpoint | Bajo · pero es lo único que hace visible el fallo de 2.1 |
+| 2.4 Docs | 3 archivos | Ninguno |
 
-La entrega 1 se puede mezclar y desplegar sola sin cambiar nada del comportamiento, y la 2
-esperar a que haya hueco para vigilar el corte. Si la 2 nunca llega, la 1 no estorba: son cuatro
-columnas sin usar.
+**1.1 a 1.3 están hechas y en `main`** (`5b8fccc`), desplegables solas: no cambian el
+comportamiento. La 2 puede esperar a que haya hueco para vigilar el corte, y si nunca llega, la 1
+no estorba — son cuatro columnas sin usar.
 
 ---
 
-*Entrega 1 implementada y en `fix/ci-y-timeouts`, junto al arreglo del CI y la API key en
-`POST /query`. La entrega 2 sigue siendo propuesta, y §6 sigue sin decidir.*
+*Entrega 1 implementada y en `main` (`5b8fccc`), junto al arreglo del CI y la API key en
+`POST /query`. §6 decidida el 25-ago con datos de tahan: un solo servicio. La entrega 2 sigue
+siendo propuesta.*
