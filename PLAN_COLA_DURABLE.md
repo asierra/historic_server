@@ -7,7 +7,7 @@ cola con *leases*. Sin broker, sin estados nuevos, sin tocar `historic_query`.
 |---|---|
 | **Rama base** | `fix/ci-y-timeouts` (`d6d64aa`) |
 | **Fecha** | 24-ago-2026 · entrega 1 implementada el 25-ago |
-| **Estado** | **Entrega 1 hecha** (§4): esquema y primitivas, sin cambio de comportamiento. Entrega 2 (§5) pendiente, y con ella la decisión de §6. |
+| **Estado** | **Entrega 1 hecha** (§4): esquema y primitivas, sin cambio de comportamiento, desplegable sola. **Entrega 2 aplazada** el 25-ago a falta de dos números de tahan (§6). |
 
 ---
 
@@ -63,8 +63,11 @@ Lo que se gana, en orden de importancia real:
 
 1. **Desplegar la API deja de tocar el trabajo en curso.** Hoy cualquier `systemctl restart
    historic-server` es una decisión operativa con consecuencias; después es rutina.
-2. **El worker se puede parar solo.** Durante la fuga de 1.1 TB del 19-ago se habrían podido
-   frenar las descargas sin tirar la API ni perder estado.
+2. ~~**El worker se puede parar solo.** Durante la fuga de 1.1 TB del 19-ago se habrían podido
+   frenar las descargas sin tirar la API ni perder estado.~~ ❌ **Falso, corregido el 25-ago.**
+   La bitácora dice que aquel día no había nada en vuelo —«las 35 filas del QueryProcessor en
+   `completado`»— y la fuga era de punteros perdidos, no de descargas desbocadas: parar el worker
+   no habría servido de nada. No hay ningún incidente registrado que pidiera esta capacidad.
 3. **Escala por unidades, no por `-w`.** Hoy subir `-w` sube las dos cosas a la vez y multiplica
    el riesgo de duplicados.
 4. **La ventana de corte es segura por construcción.** Entre desplegar la API nueva y arrancar
@@ -322,6 +325,54 @@ Dicho de otro modo: la versión de un servicio arregla el defecto que originó t
 da es que desplegar deje de interrumpir, ni el botón de parar las descargas que habría venido
 bien el 19-ago.
 
+### Evaluación del 25-ago (con la entrega 1 ya hecha)
+
+**Resultado: aplazada.** Se despliega la entrega 1 sola y se decide la 2 más adelante, con datos
+reales de tahan. La recomendación sobre la mesa es **un servicio**, por lo que sigue.
+
+Lo que cambió respecto a la tabla de arriba, ahora que la cola existe:
+
+- **El chequeo manual desaparece en las dos variantes.** Ése era el coste recurrente de verdad,
+  y está escrito en la bitácora del 19-ago: *«sigue sin haber rescate al arranque, así que ese
+  chequeo hay que repetirlo en cada despliegue de tahan»*. Con la cola, ninguna de las dos
+  opciones lo necesita.
+- **Lo que separa a las dos se encoge a ≤15 min de reanudación** en un despliegue a media
+  descarga, y son minutos, no archivos: el pipeline es idempotente en las dos rutas, así que al
+  reanudar sólo repite el listado. Sobre un trabajo de horas es ruido.
+- **De los cuatro beneficios que §2 le atribuía a separar procesos, uno era falso** (el de la
+  fuga del 19-ago, ver arriba), dos son especulativos —parar descargas aparte, escalar por
+  unidades: ningún incidente los ha pedido nunca— y el cuarto vale ese cuarto de hora.
+- **En contra hay algo que no es especulativo:** §0-ter de la bitácora tiene una sección entera
+  titulada «El despliegue de tempoftp, con tres trampas» —unit apuntando a un venv inexistente,
+  timer sin instalar, fallando a diario en silencio—. Es exactamente el modo de fallo de
+  `historic-worker`, con precedente demostrado en este entorno.
+- **Los cuatro bucles de gunicorn no son una regresión.** Hoy ya puede haber cuatro descargas
+  simultáneas: cada `POST` lanza su `BackgroundTask` en el worker que lo atienda, y el incidente
+  de los 2380 archivos duplicados fue precisamente eso. Cuatro bucles con `WORKER_SLOTS=1`
+  mantienen el mismo techo. Lo único nuevo es que la cola drena sola, así que un primer arranque
+  sacaría cuatro a la vez — lo cubre la decisión de §8 sobre lo muy viejo.
+
+**Ritmo de despliegue medido** (commits por mes, como aproximación): 61, 47, 6, 1, 0, 5, 3, 5, 0,
+0, 7. Tras la construcción inicial, meses enteros en silencio y luego racimos, que además caen
+donde peor vienen: los siete de agosto son todos de la ventana de incidencias.
+
+**Qué falta para cerrarla.** No hay base de producción en bucéfalo, así que estos dos números
+quedaron sin medir y son los que decidirían:
+
+```bash
+# En tahan · cuántas veces un reinicio pilló trabajo en vuelo
+journalctl -u historic-server --since "6 months ago" | grep -c "Stopping historic-server"
+
+# En tahan · cuánto duran las consultas de verdad (creación → última actualización)
+sqlite3 /var/lib/historic_server/consultas_goes.db \
+  "SELECT id, estado, ROUND((julianday(timestamp_actualizacion)
+   - julianday(timestamp_creacion)) * 24, 2) AS horas
+     FROM consultas ORDER BY horas DESC LIMIT 20;"
+```
+
+Si los despliegues resultan ser mucho más frecuentes de lo que sugieren los commits, o si alguna
+vez hubo ganas de frenar las descargas sin tirar la API, la recomendación se invierte.
+
 > **Esta decisión no bloquea nada.** La entrega 1 es idéntica en los dos caminos. Las cuatro
 > columnas, el reclamo, los leases, los reintentos y sus pruebas no cambian ni una línea según
 > quién corra el bucle. Sólo cambia la entrega 2: un `worker.py` con su unit (2.1 y 2.3), o unas
@@ -356,7 +407,16 @@ código sigue siendo uno: mismo `/opt/historic_server`, mismo `.venv`, un `git p
 
 ---
 
-## 7. Despliegue (variante de dos servicios)
+## 7. Despliegue
+
+**La entrega 1 se despliega sola**, y es lo acordado el 25-ago. Son tres pasos y no cambia el
+comportamiento: respaldo del `.db` (`sqlite3 .backup` + gzip, como el cron), `migrate_db.py`, y
+desplegar el código. Nadie llama todavía a las primitivas nuevas, así que revertir es un `git
+checkout`: las cuatro columnas se quedan sin usar y no estorban.
+
+Lo que sigue es el corte de la entrega 2, pendiente.
+
+### Variante de dos servicios
 
 El orden importa, y la propiedad que lo hace seguro es que **una consulta encolada no se pierde
 aunque nadie la procese todavía**.

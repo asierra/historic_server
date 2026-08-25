@@ -78,8 +78,10 @@ For this one, the big one is **`PLAN_COLA_DURABLE.md`**: turning `consultas` int
 queue so orphaned work resumes on its own. **Entrega 1 is done** — the schema (four columns + an
 index) and the primitives in `ConsultasDatabase` (`reclamar_siguiente`, `liberar_expiradas`,
 `fallar_con_reintento`, `reencolar`), covered by `tests/test_cola.py`. Nothing calls them yet, so
-runtime behavior is unchanged and it can ship on its own. Entrega 2 is the actual cut, and §6 of
-that plan holds an open decision — one service or two — that entrega 1 deliberately doesn't force.
+runtime behavior is unchanged and it can ship on its own. Entrega 2 is the actual cut, and it was
+**deferred on 2026-08-25**: the one-service-or-two decision in §6 needs two numbers from tahan
+(restart frequency and real query durations) that aren't measurable from a dev box. The standing
+recommendation there is one service. Entrega 1 is identical either way, so nothing is blocked.
 
 That plan supersedes the old "startup rescue in `lifespan`" idea, which it lists as a discarded
 alternative (§10): it re-queues orphans but leaves intact the thing that causes them, namely that
