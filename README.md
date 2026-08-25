@@ -124,7 +124,9 @@ Verificación mínima de que el servidor está activo.
 
 ### 2. Verificación de salud (`GET /health`)
 
-Verifica el estado de la base de datos, la accesibilidad al almacenamiento primario (Lustre), el consumidor de la cola, y reporta si Lustre y S3 están habilitados.
+Verifica el estado de la base de datos, la accesibilidad al almacenamiento primario (Lustre) **si está habilitado**, el consumidor de la cola, y reporta qué orígenes están activos.
+
+Con `LUSTRE_ENABLED=False` no se comprueba `SOURCE_PATH`: una ruta que el servicio no va a tocar no dice nada sobre su salud. `storage` responde entonces `"no aplica: Lustre deshabilitado"`. Si no queda ningún origen habilitado, eso sí es un fallo.
 
 Códigos de respuesta:
 - `200 OK` si todo está bien

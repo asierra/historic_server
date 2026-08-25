@@ -1110,4 +1110,86 @@ def test_sondeo_de_estado_no_exige_api_key(con_api_key):
 
     assert client.get("/query/TEST_APIKEY_GET").status_code == 200
     assert client.get("/queries").status_code == 200
-    assert client.get("/health").status_code in (200, 503)
+    # /health puede ser 200 o 503 según el entorno; lo que se comprueba aquí es
+    # que no sea 401, que es lo que trata esta prueba.
+    assert client.get("/health").status_code != 401
+
+
+# ---------------------------------------------------------------------------
+# /health
+#
+# La comprobación de almacenamiento miraba si existe SOURCE_PATH sin mirar si
+# Lustre está habilitado. En un despliegue S3-only con la ruta sin montar —el
+# caso de tahan— eso dejaba /health en 503 permanente desde sep-2025: una señal
+# en rojo fijo que nadie lee, y que ahoga a las que sí importan, como que el
+# hilo de la cola haya muerto.
+# ---------------------------------------------------------------------------
+
+class _RecoverConOrigenes:
+    """Doble con los interruptores de origen que /health consulta."""
+
+    def __init__(self, lustre, s3):
+        self.lustre_enabled = lustre
+        self.s3_enabled = s3
+
+    def procesar_consulta(self, consulta_id, query_dict):
+        pass
+
+
+def test_health_no_exige_lustre_si_esta_deshabilitado(monkeypatch):
+    """S3-only con la ruta sin montar es una configuración sana, no un fallo."""
+    monkeypatch.setattr(main, "recover", _RecoverConOrigenes(lustre=False, s3=True))
+    monkeypatch.setattr(main, "SOURCE_DATA_PATH", "/ruta/que/no/existe")
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    cuerpo = response.json()
+    assert cuerpo["status"] == "ok"
+    assert "error" not in cuerpo["storage"]
+
+
+def test_health_sigue_exigiendo_lustre_si_esta_habilitado(monkeypatch):
+    """Con Lustre habilitado, que falte la ruta sí es un fallo real."""
+    monkeypatch.setattr(main, "recover", _RecoverConOrigenes(lustre=True, s3=True))
+    monkeypatch.setattr(main, "SOURCE_DATA_PATH", "/ruta/que/no/existe")
+
+    response = client.get("/health")
+
+    assert response.status_code == 503
+    assert "no existe" in response.json()["storage"]
+
+
+def test_health_falla_si_no_queda_ningun_origen(monkeypatch):
+    """Sin Lustre y sin S3 no hay de dónde recuperar, aunque todo lo demás esté bien."""
+    monkeypatch.setattr(main, "recover", _RecoverConOrigenes(lustre=False, s3=False))
+
+    response = client.get("/health")
+
+    assert response.status_code == 503
+    assert "ni Lustre ni S3" in response.json()["storage"]
+
+
+def test_health_avisa_si_el_hilo_de_la_cola_murio_con_trabajo(monkeypatch):
+    """El fallo que no se ve de ninguna otra forma.
+
+    Sin esto la API sigue respondiendo 202 a todo mientras la cola crece y
+    nadie la drena. Es la razón de que /health tenga que estar limpio: un 503
+    permanente por otra cosa lo haría inútil.
+    """
+    monkeypatch.setattr(main, "recover", _RecoverConOrigenes(lustre=False, s3=True))
+    _crear_consulta_en_estado("TEST_HEALTH_COLA", "recibido")
+
+    class _BucleMuerto:
+        vivo = False
+        worker_id = "tahan:1"
+        consulta_en_curso = None
+
+    monkeypatch.setattr(main, "bucle", _BucleMuerto())
+
+    response = client.get("/health")
+
+    assert response.status_code == 503
+    cuerpo = response.json()
+    assert cuerpo["cola"]["hilo_vivo"] is False
+    assert cuerpo["cola"]["encoladas"] == 1

@@ -183,18 +183,32 @@ async def health_check_detailed():
         db_status = f"error: {e}"
         overall_status = "error"
 
-    # 2. Verificar que el almacenamiento primario (Lustre) esté accesible
-    if not os.path.exists(SOURCE_DATA_PATH):
-        storage_status = f"error: La ruta de origen '{SOURCE_DATA_PATH}' no existe o no es accesible."
-        overall_status = "error"
-
-    # 3. Reportar estado de Lustre y S3
+    # 2. Qué orígenes están habilitados. Va antes que la comprobación de disco
+    #    porque decide si esa comprobación significa algo.
     lustre_status = getattr(recover, "lustre_enabled", None)
     s3_status = getattr(recover, "s3_enabled", None)
     if lustre_status is None:
         lustre_status = False
     if s3_status is None:
         s3_status = False
+
+    # 3. Verificar el almacenamiento primario, **sólo si se va a usar**.
+    #    Comprobarlo incondicionalmente dejaba /health en 503 permanente en
+    #    cualquier despliegue con LUSTRE_ENABLED=false y la ruta sin montar,
+    #    que es el caso de tahan. Llevaba así desde 2622b63 (sep-2025), o sea
+    #    que la señal estaba en rojo fijo y nadie la leía — el mismo patrón que
+    #    tuvo el CI. Una ruta que el servicio no va a tocar no dice nada sobre
+    #    su salud, y un 503 permanente ahoga a los que sí importan.
+    if not lustre_status:
+        storage_status = "no aplica: Lustre deshabilitado"
+    elif not os.path.exists(SOURCE_DATA_PATH):
+        storage_status = f"error: La ruta de origen '{SOURCE_DATA_PATH}' no existe o no es accesible."
+        overall_status = "error"
+
+    # Sin ningún origen no hay servicio que dar, aunque cada pieza esté sana.
+    if not lustre_status and not s3_status:
+        storage_status = "error: ni Lustre ni S3 están habilitados; no hay de dónde recuperar."
+        overall_status = "error"
 
     # 4. La cola. Es el único fallo de esta arquitectura que no se ve desde
     #    fuera: si el hilo muere, la API sigue aceptando consultas y
@@ -216,9 +230,14 @@ async def health_check_detailed():
     if not cola_status["hilo_vivo"] and cola_status.get("encoladas"):
         overall_status = "error"
 
+    # JSONResponse y no un dict pelado: el `status_code` se calculaba y se
+    # tiraba, así que /health respondía 200 siempre —incluso con la base
+    # caída— y el 503 que documenta el README no se ha enviado nunca. Un
+    # monitor que mirara el código HTTP llevaba todo este tiempo viendo el
+    # servicio sano pasara lo que pasara.
     status_code = 200 if overall_status == "ok" else 503 # Service Unavailable
 
-    return {
+    return JSONResponse(status_code=status_code, content={
         "status": overall_status,
         "database": db_status,
         "storage": storage_status,
@@ -232,7 +251,7 @@ async def health_check_detailed():
             "recovery_timeout_s": _s3_circuit_breaker.recovery_timeout,
         },
         "timestamp": datetime.now().isoformat()
-    }
+    })
 
 
 def _validate_and_prepare_request(request_data: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
