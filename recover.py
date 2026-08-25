@@ -173,6 +173,26 @@ class RecoverFiles:
             objetivos_fallidos_local = []
             archivos_pendientes_local: List[Path] = []
 
+            # ¿Está Lustre ahí? Se comprueba la raíz una vez, antes de recorrer
+            # días. No es una comprobación de más: /depot se desmonta durante
+            # semanas por cortes de corriente y discos dañados, y hasta ahora eso
+            # era indistinguible de «no tenemos esa semana» —cada día pedido
+            # encontraba su directorio ausente y avisaba lo mismo—. La consulta
+            # se sirve igual desde S3, que es lo correcto cuando la avería dura
+            # semanas; lo que cambia es que ahora queda escrito en el reporte,
+            # para que dentro de seis meses se sepa leer por qué `lustre` da 0.
+            if not self.lustre_enabled:
+                estado_lustre = "deshabilitado"
+            elif self.source_data_path.exists():
+                estado_lustre = "ok"
+            else:
+                estado_lustre = "no_disponible"
+                self.logger.error(
+                    f"❌ Lustre no disponible: la raíz {self.source_data_path} no existe. "
+                    "Probablemente el volumen no está montado. La consulta se servirá "
+                    "íntegra desde S3, más lenta. Esto NO significa que falten datos."
+                )
+
             # --- Optimización: Separar productos locales de los exclusivos de S3 ---
             productos_req_originales = query_dict.get('productos', []) or []
             s3_only_products = set(_SAT_CONFIG.S3_ONLY_PRODUCTS)
@@ -182,7 +202,7 @@ class RecoverFiles:
             query_para_lustre['productos'] = productos_para_lustre
             # --------------------------------------------------------------------
 
-            if self.lustre_enabled:
+            if estado_lustre == "ok":
                 # 2. Descubrir y filtrar archivos locales.
                 # Se elimina la lógica especial para 'ALL' en esta etapa.
                 # La decisión de copiar el tgz completo o extraer se toma por archivo en _process_safe_recover_file.
@@ -309,7 +329,7 @@ class RecoverFiles:
             timestamp_creacion = consulta_db.get("timestamp_creacion") if consulta_db else datetime.now().isoformat()
 
             resultados_finales = self._generar_reporte_final(
-                consulta_id, dest_entries, s3_recuperados, directorio_destino, objetivos_fallidos_final, query_dict, timestamp_creacion
+                consulta_id, dest_entries, s3_recuperados, directorio_destino, objetivos_fallidos_final, query_dict, timestamp_creacion, estado_lustre
             )
             # Mensaje final breve y legible
             total_recuperados = resultados_finales.get("total_archivos", 0)
@@ -374,7 +394,7 @@ class RecoverFiles:
         
         return None
 
-    def _generar_reporte_final(self, consulta_id: str, dest_entries: list, s3_recuperados: List[Path], directorio_destino: Path, objetivos_fallidos: List[Path], query_original: Dict, timestamp_creacion_iso: str) -> Dict:
+    def _generar_reporte_final(self, consulta_id: str, dest_entries: list, s3_recuperados: List[Path], directorio_destino: Path, objetivos_fallidos: List[Path], query_original: Dict, timestamp_creacion_iso: str, estado_lustre: str = "ok") -> Dict:
         """Genera el diccionario de resultados finales."""
         # --- Cálculo de la duración total del procesamiento ---
         timestamp_finalizacion = datetime.now()
@@ -443,7 +463,12 @@ class RecoverFiles:
             "fuentes": {
                 "lustre": {
                     "archivos": lustre_list,
-                    "total": len(lustre_names_full)
+                    "total": len(lustre_names_full),
+                    # 'ok' | 'deshabilitado' | 'no_disponible'. Sin esto, un total
+                    # de 0 es ambiguo: puede ser que el archivo no tuviera esas
+                    # fechas o que el volumen estuviera caído, y son cosas muy
+                    # distintas a la hora de interpretar el resultado después.
+                    "estado": estado_lustre
                 },
                 "s3": {
                     "archivos": s3_list,

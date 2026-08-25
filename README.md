@@ -290,7 +290,7 @@ Una vez que el estado es `completado`, devuelve el reporte detallado con la list
     "estado": "completado",
     "resultados": {
         "fuentes": {
-            "lustre": { "archivos": ["..."], "total": 110 },
+            "lustre": { "archivos": ["..."], "total": 110, "estado": "ok" },
             "s3":     { "archivos": ["..."], "total": 2 }
         },
         "conteo_por_producto": {
@@ -316,6 +316,16 @@ Una vez que el estado es `completado`, devuelve el reporte detallado con la list
 ```
 
 Nota: el campo `consulta_recuperacion` contiene la consulta original filtrada a los archivos que **no** se pudieron recuperar, para facilitar reintentos.
+
+`fuentes.lustre.estado` explica por qué el total puede ser cero, que sin él es ambiguo:
+
+| Valor | Significa |
+|---|---|
+| `ok` | Lustre estaba disponible. Un total de 0 quiere decir que el archivo no tenía esas fechas. |
+| `no_disponible` | La raíz `SOURCE_PATH` no existe: el volumen no está montado. **No faltan datos**, sólo se sirvió todo desde S3 y más lento. |
+| `deshabilitado` | `LUSTRE_ENABLED=False`. Decisión de configuración, no avería. |
+
+La distinción importa al leer un resultado meses después: `/depot` se ha desmontado durante semanas por cortes de corriente y discos dañados, y hasta ahora eso era indistinguible de una laguna del archivo.
 
 ---
 
