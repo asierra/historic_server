@@ -1,5 +1,6 @@
 import requests
 import json
+import os
 import time
 import argparse
 from typing import Dict
@@ -159,6 +160,13 @@ def main(base_url: str, json_file: str | None, timeout: int, poll_interval: int,
     Función principal para ejecutar el cliente de la API.
     """
     with requests.Session() as session:
+        # Si el servidor tiene API_KEY configurada, POST /query la exige (igual
+        # que /restart y DELETE). Se toma del entorno para no pedirla por
+        # argumento y que acabe en el historial del shell.
+        api_key = os.environ.get("API_KEY", "").strip()
+        if api_key:
+            session.headers["X-API-Key"] = api_key
+
         # --- Modo: Solo Validar ---
         if validate_only:
             if not json_file:

@@ -917,3 +917,113 @@ def test_restart_de_completado_ignora_el_latido(recover_espia):
         response = client.post(f"/query/{consulta_id}/restart")
 
         assert response.status_code == 202, f"{estado} quedó bloqueado por el latido"
+
+
+# ---------------------------------------------------------------------------
+# API key
+#
+# `API_KEY` es opcional: si no se configura, el servicio queda abierto (útil en
+# desarrollo, y es como corre hoy en el laboratorio). Lo que estas pruebas fijan
+# es que, cuando SÍ está configurada, la protección cubre los tres endpoints que
+# comprometen recursos o destruyen datos —crear, reiniciar y borrar— y no las
+# lecturas, que el cliente sondea constantemente.
+#
+# Antes de esto el mecanismo entero estaba sin cobertura, incluidos /restart y
+# DELETE, que ya lo usaban.
+# ---------------------------------------------------------------------------
+
+CLAVE_DE_PRUEBA = "clave-de-prueba"
+
+
+@pytest.fixture
+def con_api_key(monkeypatch):
+    """Configura una API key, como en un despliegue protegido."""
+    monkeypatch.setattr(main, "API_KEY", CLAVE_DE_PRUEBA)
+    return CLAVE_DE_PRUEBA
+
+
+def test_crear_consulta_sin_api_key_es_rechazada(con_api_key, recover_espia):
+    """POST /query es el endpoint que compromete disco: exige la clave."""
+    response = client.post("/query", json=VALID_REQUEST)
+
+    assert response.status_code == 401
+    # Y no encoló nada: el rechazo ocurre antes de tocar la DB o el pipeline.
+    assert recover_espia.llamadas == []
+
+
+def test_crear_consulta_con_api_key_incorrecta_es_rechazada(con_api_key, recover_espia):
+    response = client.post(
+        "/query", json=VALID_REQUEST, headers={"X-API-Key": "no-es-la-buena"}
+    )
+
+    assert response.status_code == 401
+    assert recover_espia.llamadas == []
+
+
+def test_crear_consulta_con_api_key_correcta_procede(con_api_key, recover_espia, monkeypatch):
+    """Con la clave correcta el flujo es exactamente el de siempre.
+
+    Es el caso de historic_query, que manda X-API-Key en todas sus llamadas
+    desde un único helper (`call_api` en historic/utils.py).
+    """
+    monkeypatch.setattr(main, "generar_id_consulta", lambda: "TEST_APIKEY_OK")
+
+    response = client.post(
+        "/query", json=VALID_REQUEST, headers={"X-API-Key": CLAVE_DE_PRUEBA}
+    )
+
+    assert response.status_code == 202
+    assert response.json()["consulta_id"] == "TEST_APIKEY_OK"
+    assert recover_espia.llamadas == ["TEST_APIKEY_OK"]
+
+
+def test_crear_consulta_sin_api_key_configurada_sigue_abierta(recover_espia, monkeypatch):
+    """Sin API_KEY configurada no se pide nada: es como corre hoy el servicio."""
+    # Explícito y no heredado del entorno: si el .env de quien corre las pruebas
+    # tuviera API_KEY, este caso probaría lo contrario de lo que dice su nombre.
+    monkeypatch.setattr(main, "API_KEY", None)
+    monkeypatch.setattr(main, "generar_id_consulta", lambda: "TEST_APIKEY_ABIERTA")
+
+    response = client.post("/query", json=VALID_REQUEST)
+
+    assert response.status_code == 202
+    assert recover_espia.llamadas == ["TEST_APIKEY_ABIERTA"]
+
+
+def test_restart_exige_api_key(con_api_key, recover_espia):
+    """Cobertura del mecanismo tal como ya existía en /restart."""
+    _crear_consulta_en_estado("TEST_APIKEY_RESTART", "error")
+
+    sin_clave = client.post("/query/TEST_APIKEY_RESTART/restart")
+    assert sin_clave.status_code == 401
+    assert recover_espia.llamadas == []
+
+    con_clave = client.post(
+        "/query/TEST_APIKEY_RESTART/restart", headers={"X-API-Key": CLAVE_DE_PRUEBA}
+    )
+    assert con_clave.status_code == 202
+    assert recover_espia.llamadas == ["TEST_APIKEY_RESTART"]
+
+
+def test_delete_exige_api_key(con_api_key):
+    """Cobertura del mecanismo tal como ya existía en DELETE."""
+    _crear_consulta_en_estado("TEST_APIKEY_DELETE", "completado")
+
+    sin_clave = client.delete("/query/TEST_APIKEY_DELETE")
+    assert sin_clave.status_code == 401
+    assert main.db.obtener_consulta("TEST_APIKEY_DELETE") is not None
+
+    con_clave = client.delete(
+        "/query/TEST_APIKEY_DELETE", headers={"X-API-Key": CLAVE_DE_PRUEBA}
+    )
+    assert con_clave.status_code == 200
+    assert main.db.obtener_consulta("TEST_APIKEY_DELETE") is None
+
+
+def test_sondeo_de_estado_no_exige_api_key(con_api_key):
+    """Las lecturas siguen abiertas: el cliente las sondea cada pocos segundos."""
+    _crear_consulta_en_estado("TEST_APIKEY_GET", "completado")
+
+    assert client.get("/query/TEST_APIKEY_GET").status_code == 200
+    assert client.get("/queries").status_code == 200
+    assert client.get("/health").status_code in (200, 503)

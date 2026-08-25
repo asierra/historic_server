@@ -309,11 +309,19 @@ def _validate_and_prepare_request(request_data: Dict[str, Any]) -> Tuple[Dict[st
 @app.post("/query")
 async def crear_solicitud(
     background_tasks: BackgroundTasks,
+    request: Request,
     request_data: Dict[str, Any] = Body(...),
 ):
     """
     ✅ ENDPOINT PRINCIPAL: Crear y procesar solicitud
     """
+    # Protegido como /restart y DELETE: es el endpoint que compromete recursos
+    # —encola descargas que han llegado a cientos de GB— así que dejarlo abierto
+    # mientras los otros dos piden clave era una asimetría, no una decisión.
+    # historic_query manda la clave en todas sus llamadas (un único helper,
+    # `call_api`), así que esto no le cambia nada.
+    _require_api_key(request)
+
     try:
         # 1. Validar y preparar la solicitud usando la función de ayuda
         #    Esta función ahora incluye las validaciones de límites y espacio.

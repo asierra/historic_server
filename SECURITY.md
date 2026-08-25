@@ -103,6 +103,10 @@ sudo systemctl restart historic-server
 
 ### API Key Opcional
 
+Los endpoints protegidos son los que **crean o destruyen**: `POST /query`, `POST /query/{id}/restart` y `DELETE /query/{id}`. Las lecturas (`GET /query/{id}`, `GET /queries`, `/health`) y `POST /validate` quedan abiertas: el cliente sondea el estado cada pocos segundos y `/validate` no compromete nada.
+
+⚠️ **Al activarla en un despliegue ya en marcha, hay que ponerla en los dos lados a la vez.** En `historic_query` la variable es `QUERY_PROCESSOR_API_KEY` (su helper `call_api` la adjunta a todas las llamadas). Si sólo se configura en el servidor, el envío de consultas empieza a responder 401.
+
 Si no configuras `API_KEY` en el `.env`, los endpoints protegidos estarán **abiertos**. Esto es útil para:
 - Desarrollo local
 - Redes internas protegidas por firewall

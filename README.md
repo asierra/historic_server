@@ -181,9 +181,12 @@ Códigos de error posibles:
 
 Envía la solicitud para ser procesada en segundo plano. Ejecuta las mismas validaciones que `/validate` antes de encolar. Devuelve una `consulta_id`.
 
+Requiere header `X-API-Key` si la variable `API_KEY` está configurada. Es el endpoint que compromete recursos —encola descargas que han llegado a cientos de GB—, así que está protegido igual que `restart` y `delete`. Las lecturas (`GET /query/{id}`, `GET /queries`, `/health`) y `POST /validate`, que no crean nada, siguen abiertas.
+
 Códigos y headers:
 - `202 Accepted`
 - `Location: /query/{ID}`
+- `401 Unauthorized` si falta la `X-API-Key` o no coincide (solo cuando `API_KEY` está configurada)
 - `409 Conflict` si ya existe una consulta con el mismo `consulta_id`
 
 **Respuesta (body):**
@@ -455,7 +458,8 @@ pytest -m "not real_io"  # sin I/O real
     - Predeterminado: 100.
     - Disminuir para ver actualizaciones más frecuentes en consultas grandes (p. ej., 50).
 - Seguridad API opcional:
-  - API_KEY: si se define, los endpoints de restart y delete requieren el header X-API-Key con ese valor.
+  - API_KEY: si se define, los endpoints que crean o destruyen —`POST /query`, `POST /query/{id}/restart` y `DELETE /query/{id}`— requieren el header X-API-Key con ese valor. Las lecturas y `POST /validate` quedan abiertas.
+  - Si la defines en un despliegue ya en marcha, configúrala **a la vez** en el cliente: en `historic_query` es `QUERY_PROCESSOR_API_KEY`, que su helper `call_api` adjunta a todas las llamadas. Con una sola de las dos puestas, el envío de consultas responde 401.
 
 Ejemplo de configuración:
 
