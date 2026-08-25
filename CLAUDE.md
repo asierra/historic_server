@@ -72,14 +72,23 @@ recent heartbeat means someone is really working, a stale one (older than `LATID
 means the task died. `error`/`completado` are always claimable; they have no work in flight.
 
 ### Open work
-Tracked in `../historic_query/pendientes.md` §0-ter (the operational log lives in that repo). For
-this one: a startup rescue in `lifespan` for queries orphaned by a restart (now feasible — the lock
-above is the missing piece it needed), no test coverage for the 413 quota rejection, and a timing
-flake in `tests/test_simulator_sources_behavior.py` (four 20s waits against a simulator that takes
-~9s per query).
+Tracked in `../historic_query/pendientes.md` §0-ter (the operational log lives in that repo).
+
+For this one, the big one is **`PLAN_COLA_DURABLE.md`**: turning `consultas` into a lease-based
+queue so orphaned work resumes on its own. **Entrega 1 is done** — the schema (four columns + an
+index) and the primitives in `ConsultasDatabase` (`reclamar_siguiente`, `liberar_expiradas`,
+`fallar_con_reintento`, `reencolar`), covered by `tests/test_cola.py`. Nothing calls them yet, so
+runtime behavior is unchanged and it can ship on its own. Entrega 2 is the actual cut, and §6 of
+that plan holds an open decision — one service or two — that entrega 1 deliberately doesn't force.
+
+That plan supersedes the old "startup rescue in `lifespan`" idea, which it lists as a discarded
+alternative (§10): it re-queues orphans but leaves intact the thing that causes them, namely that
+deploying the API kills in-flight downloads.
+
+Also open: no test coverage for the 413 quota rejection.
 
 ### Storage backend (the pending sqlite→postgres migration)
-`database.py`'s `ConsultasDatabase` is a hand-written SQLite wrapper (no ORM) using **WAL journal mode** for reader/writer concurrency, with a single `consultas` table (id, estado, query JSON blob, resultados JSON blob, progreso, mensaje, timestamps, usuario). All queries are raw `sqlite3` calls with manual `try/except` + logging per method — there's no connection pooling or migrations framework; `migrate_db.py` is a standalone imperative script that inspects `PRAGMA table_info` and `ALTER TABLE`s as needed, run manually (not on app startup). A move to Postgres would need to replace this whole module (and `migrate_db.py`) since nothing here is DB-agnostic (raw SQL strings, sqlite-specific `PRAGMA` calls, file-path-based `DB_PATH` config). Given the low write/read volume (single client today), this has been deprioritized — revisit if concurrent multi-client access becomes real.
+`database.py`'s `ConsultasDatabase` is a hand-written SQLite wrapper (no ORM) using **WAL journal mode** for reader/writer concurrency, with a single `consultas` table (id, estado, query JSON blob, resultados JSON blob, progreso, mensaje, timestamps, usuario, plus the queue columns `intentos`/`lease_hasta`/`worker_id`/`disponible_desde` — declared once in `database.py`'s `COLUMNAS_COLA` and reused by `migrate_db.py` so the two paths can't drift). All queries are raw `sqlite3` calls with manual `try/except` + logging per method — there's no connection pooling or migrations framework; `migrate_db.py` is a standalone imperative script that inspects `PRAGMA table_info` and `ALTER TABLE`s as needed, run manually (not on app startup). A move to Postgres would need to replace this whole module (and `migrate_db.py`) since nothing here is DB-agnostic (raw SQL strings, sqlite-specific `PRAGMA` calls, file-path-based `DB_PATH` config). Given the low write/read volume (single client today), this has been deprioritized — revisit if concurrent multi-client access becomes real.
 
 ### Dual storage + background recovery (`recover.py`, `s3_recover.py`, `background_simulator.py`)
 - `recover.py` — `RecoverFiles` orchestrates: `LustreRecoverFiles` for the primary POSIX filesystem (`SOURCE_PATH`, organized `sensor/nivel/dominio/año/semana/*.tgz`), extracting/copying via a `pebble.ProcessPool` (`MAX_WORKERS`) with per-file timeouts (`FILE_PROCESSING_TIMEOUT_SECONDS`) to avoid zombie processes. Files not found locally fall through to S3.

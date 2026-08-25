@@ -21,6 +21,12 @@ from pathlib import Path
 from typing import List, Tuple
 import logging
 
+# Las columnas de la cola se declaran en database.py y se importan aquí a
+# propósito: son las mismas que crea _init_db() para bases nuevas, y tenerlas
+# escritas dos veces es la forma clásica de que una base migrada y una recién
+# creada acaben con esquemas distintos.
+from database import COLUMNAS_COLA, INDICE_COLA
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -81,12 +87,37 @@ def migrate_add_usuario_column(conn: sqlite3.Connection) -> bool:
     return True
 
 
+def migrate_add_columnas_cola(conn: sqlite3.Connection) -> bool:
+    """Añade las columnas de la cola durable y su índice.
+
+    Aditivo: las filas existentes quedan con intentos=0 y los tres campos a
+    NULL, que el reclamo interpreta como «disponible y sin dueño». Ninguna
+    consulta en vuelo cambia de estado por esto.
+    """
+    añadidas = []
+    for nombre, tipo in COLUMNAS_COLA:
+        if column_exists(conn, "consultas", nombre):
+            log.info(f"  ℹ️  Columna '{nombre}' ya existe")
+            continue
+        log.info(f"  🔧 Añadiendo columna '{nombre}'")
+        conn.execute(f"ALTER TABLE consultas ADD COLUMN {nombre} {tipo}")
+        añadidas.append(nombre)
+
+    # CREATE INDEX IF NOT EXISTS: correr esto dos veces no es un error.
+    conn.execute(INDICE_COLA)
+    conn.commit()
+
+    if añadidas:
+        log.info(f"  ✅ Columnas de cola añadidas: {', '.join(añadidas)}")
+    return bool(añadidas)
+
+
 def verify_schema(conn: sqlite3.Connection) -> bool:
     """Verifica que el esquema tenga todas las columnas esperadas."""
     expected_columns = [
         'id', 'estado', 'query', 'resultados', 'progreso', 
         'mensaje', 'timestamp_creacion', 'timestamp_actualizacion', 'usuario'
-    ]
+    ] + [nombre for nombre, _ in COLUMNAS_COLA]
     
     actual_columns = get_table_columns(conn, "consultas")
     
@@ -153,6 +184,9 @@ def main():
             
             if migrate_add_usuario_column(conn):
                 cambios_realizados.append("Columna 'usuario' añadida")
+
+            if migrate_add_columnas_cola(conn):
+                cambios_realizados.append("Columnas de cola durable añadidas")
             
             # Verificar esquema final
             log.info("\n🔍 Verificando esquema final...")
