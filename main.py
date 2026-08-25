@@ -50,6 +50,28 @@ async def lifespan(app: FastAPI):
     
     if PROCESSOR_MODE == "real":
         S3_ENABLED = settings.s3_enabled
+
+        # Avisar en el journal si se arranca con un origen apagado. Es una
+        # degradación silenciosa: el servicio funciona, sólo que más lento y
+        # con menos cobertura, y no hay ninguna otra señal de que se está
+        # trabajando a medias. Pasó en agosto de 2026, cuando una
+        # actualización de kernel dejó a Lustre sin montar en tahan y el
+        # servicio siguió sirviendo de S3 sin decir nada.
+        if not settings.lustre_enabled:
+            log.warning(
+                "⚠️  Lustre DESHABILITADO: todo se recuperará de S3, más lento "
+                "y sin lo que no esté en el bucket público. Si no es intencional, "
+                "revisa LUSTRE_ENABLED y que %s esté montado.", SOURCE_DATA_PATH,
+            )
+        elif not os.path.exists(SOURCE_DATA_PATH):
+            log.error(
+                "❌ Lustre habilitado pero %s no existe: probablemente no está "
+                "montado. Las consultas caerán a S3 archivo por archivo.",
+                SOURCE_DATA_PATH,
+            )
+        if not S3_ENABLED:
+            log.warning("⚠️  S3 DESHABILITADO: sólo se recuperará de Lustre.")
+
         recover = RecoverFiles(
             db=db,
             source_data_path=str(SOURCE_DATA_PATH),
