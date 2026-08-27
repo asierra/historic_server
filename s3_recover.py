@@ -104,7 +104,13 @@ class S3RecoverFiles:
 
     def discover_files(self, query_dict: Dict, goes19_operational_date: datetime) -> Dict[str, str]:
         sat_name = query_dict.get('satelite', 'GOES-16')
-        first_day_jjj = next(iter(query_dict.get('fechas', {})), None)
+        # La fecha más antigua, no la primera del diccionario: `fechas` no llega
+        # ordenado (una consulta real trae 2023180 antes que 2023167), así que
+        # `next(iter(...))` elegía el satélite —y con él el bucket— de forma
+        # arbitraria. Sigue siendo un solo bucket para toda la consulta: una que
+        # cruce el relevo GOES-16 → GOES-19 recupera a medias. Ver C6.
+        fechas = query_dict.get('fechas', {})
+        first_day_jjj = min(fechas) if fechas else None
         request_date = datetime.strptime(first_day_jjj, '%Y%j') if first_day_jjj else datetime.now()
         sat_code = self.get_sat_code_for_date(sat_name, request_date, goes19_operational_date)
         s3_bucket = f"noaa-goes{sat_code.replace('G', '')}"
