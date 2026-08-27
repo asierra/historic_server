@@ -2,34 +2,64 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vistas.lanot.unam.mx/historic_query_schema.json",
   "title": "Esquema para consulta historica LANOT",
-  "description": "Soporta el formato original de fechas como objeto",
+  "description": "Contrato de la consulta histórica. Fuente de verdad: este archivo. historic_query mantiene una copia en historic/schema/ y no debe editarla.",
   "type": "object",
   "properties": {
     "sat": {
       "type": "string",
       "description": "Nombre del satélite (ej. GOES-16, GOES-18)"
     },
+    "sensor": {
+      "type": "string",
+      "description": "Sensor a consultar (ej. abi). Los satélites polares se distinguen por sensor y no llevan dominio."
+    },
     "nivel": {
       "type": "string",
-      "description": "Nivel de procesamiento de los datos"
+      "description": "Nivel de procesamiento. Sin enum a propósito: 'L1b'/'L2' es vocabulario GOES y no necesariamente aplica a satélites polares."
     },
     "dominio": {
       "type": "string",
-      "description": "Dominio o región geográfica"
+      "enum": [
+        "fd",
+        "conus"
+      ],
+      "description": "Dominio geográfico. Ausente en satélites polares."
     },
     "productos": {
-      "description": "Productos derivados",
-      "oneOf": [
-        { "type": "string", "enum": ["ALL"] },
-        { "type": "array", "items": { "type": "string" } }
-      ]
+      "description": "Productos derivados. Use [\"ALL\"] para todos. No se enumeran: el vocabulario de productos difiere hoy entre el formulario y GOES_PERIODICITY.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9]{1,9}$"
+      }
     },
     "bandas": {
-      "description": "Bandas espectrales",
-      "oneOf": [
-        { "type": "string", "enum": ["ALL"] },
-        { "type": "array", "items": { "type": "string" } }
-      ]
+      "description": "Bandas espectrales. Use [\"ALL\"] para todas; la cadena \"ALL\" sin arreglo no es válida.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": [
+          "ALL",
+          "01",
+          "02",
+          "03",
+          "04",
+          "05",
+          "06",
+          "07",
+          "08",
+          "09",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "15",
+          "16"
+        ]
+      }
     },
     "fechas": {
       "type": "object",
@@ -63,6 +93,21 @@
       "description": "Fecha y hora de creación en formato ISO 8601"
     }
   },
-  "required": ["nivel", "fechas"],
+  "required": [
+    "nivel",
+    "fechas"
+  ],
+  "anyOf": [
+    {
+      "required": [
+        "bandas"
+      ]
+    },
+    {
+      "required": [
+        "productos"
+      ]
+    }
+  ],
   "additionalProperties": false
 }

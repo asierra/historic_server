@@ -1,7 +1,11 @@
 {
   "nivel": "L2",
-  "productos": "ALL",
-  "bandas": "ALL",
+  "productos": [
+    "ALL"
+  ],
+  "bandas": [
+    "ALL"
+  ],
   "dominio": "conus",
   "creado_por": "asierra@unam.mx",
   "fechas": {

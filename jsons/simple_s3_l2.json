@@ -16,7 +16,9 @@
     "GFLS",
     "VAAF"
   ],
-  "bandas": "ALL",
+  "bandas": [
+    "ALL"
+  ],
   "dominio": "conus",
   "creado_por": "vescudero@geografia.unam.mx",
   "fechas": {
@@ -25,4 +27,3 @@
     ]
   }
 }
-

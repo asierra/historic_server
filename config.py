@@ -162,8 +162,16 @@ class SatelliteConfigGOES(SatelliteConfigBase):
         return bandas
 
     def expand_bandas(self, bandas: List[str]) -> List[str]:
-        """Expande 'ALL' o tolera lista vacía/None sin error."""
-        bandas = bandas or []
+        """Expande 'ALL' o tolera lista vacía/None sin error.
+
+        `bandas` tiene que ser una lista. Si llega una cadena, `"ALL" in bandas`
+        es una prueba de **subcadena**: funcionaba para "ALL" por accidente, y
+        "CALLE" también expandía a las 16 bandas. El esquema ya prohíbe la forma
+        de cadena; esto es la red por si algo la construye sin pasar por ahí.
+        """
+        if isinstance(bandas, str):
+            bandas = [bandas]
+        bandas = list(bandas or [])
         if "ALL" in bandas:
             return self.VALID_BANDAS
         return bandas
@@ -236,7 +244,11 @@ class SatelliteConfigGOES(SatelliteConfigBase):
         elif nivel == "L2":
             # Para L2, la estimación se basa en los productos solicitados.
             # La expansión de CMIP por bandas ocurre en la generación de archivos, no aquí.
-            items_to_process = request_data.get("productos") or []
+            # Una cadena aquí no falla, se itera por caracteres: "ALL" recorría
+            # ['A','L','L'], get_periodicity daba KeyError con cada uno y caía al
+            # default, y la estimación salía mal pero plausible, sin excepción.
+            productos = request_data.get("productos") or []
+            items_to_process = [productos] if isinstance(productos, str) else list(productos)
 
         for item in items_to_process:
             files_per_item[item] = 0

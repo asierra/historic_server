@@ -1,2 +1,13 @@
-{"nivel": "L1b","dominio": "fd","creado_por": "kk@wc.com","bandas": "ALL","fechas": {"20250902": ["04:00-04:30"]}}
-
+{
+  "nivel": "L1b",
+  "dominio": "fd",
+  "creado_por": "kk@wc.com",
+  "bandas": [
+    "ALL"
+  ],
+  "fechas": {
+    "20250902": [
+      "04:00-04:30"
+    ]
+  }
+}
