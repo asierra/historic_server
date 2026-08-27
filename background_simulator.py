@@ -2,6 +2,8 @@ import time
 import logging
 import os
 from datetime import datetime, timedelta
+
+import horarios
 import random
 from typing import Dict
 from database import ConsultasDatabase
@@ -147,11 +149,18 @@ class BackgroundSimulator():
         for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
             fecha_dt = datetime.strptime(fecha_jjj, "%Y%j")
             for horario_str in horarios_list:
-                partes = horario_str.split('-')
-                inicio_str, fin_str = partes[0], partes[1] if len(partes) > 1 else partes[0]
-                
-                inicio_dt = fecha_dt.replace(hour=int(inicio_str.split(':')[0]), minute=int(inicio_str.split(':')[1]))
-                fin_dt = fecha_dt.replace(hour=int(fin_str.split(':')[0]), minute=int(fin_str.split(':')[1]))
+                try:
+                    inicio_min, fin_min, cruza = horarios.parsear(horario_str)
+                except ValueError:
+                    continue
+
+                inicio_dt = fecha_dt + timedelta(minutes=inicio_min)
+                fin_dt = fecha_dt + timedelta(minutes=fin_min)
+                if cruza:
+                    # La ventana cruza la medianoche; ver horarios.py. Se recorre
+                    # hasta el fin del día siguiente y se reetiqueta al mismo día
+                    # juliano, que es lo que hace el filtro de la recuperación.
+                    fin_dt += timedelta(days=1)
 
                 current_dt = inicio_dt
                 while current_dt <= fin_dt:
@@ -161,13 +170,17 @@ class BackgroundSimulator():
 
                     if es_tiempo_fd or es_tiempo_conus:
                         # Formato: sYYYYJJJHHMM
-                        timestamp_archivo = f"s{current_dt.strftime('%Y%j%H%M')}"
+                        # Con cruce de medianoche la segunda mitad pertenece al
+                        # mismo día juliano de la consulta.
+                        etiqueta_dt = fecha_dt.replace(hour=current_dt.hour,
+                                                       minute=current_dt.minute)
+                        timestamp_archivo = f"s{etiqueta_dt.strftime('%Y%j%H%M')}"
                         if nivel == 'L1b':
                             nombre_tgz = f"ABI-{nivel.upper()}-Rad{dom_code}-M6_{sat_code}-{timestamp_archivo}.tgz"
                         else: # L2
                             nombre_tgz = f"ABI-L2{dom_code}-M6_{sat_code}-{timestamp_archivo}.tgz"
 
-                        fecha_ymd_str = current_dt.strftime("%Y%m%d")
+                        fecha_ymd_str = etiqueta_dt.strftime("%Y%m%d")
                         objetivos.append({
                             "nombre_archivo": nombre_tgz,
                             "fecha_original_ymd": fecha_ymd_str,

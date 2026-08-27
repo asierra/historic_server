@@ -13,6 +13,9 @@ class Horario:
     def __post_init__(self):
         inicio_dt = datetime.combine(datetime.today(), self.inicio)
         fin_dt = datetime.combine(datetime.today(), self.fin)
+        if fin_dt < inicio_dt:
+            # La ventana cruza la medianoche; ver horarios.py.
+            fin_dt += timedelta(days=1)
         self.duracion_horas = (fin_dt - inicio_dt).total_seconds() / 3600
 
 @dataclass

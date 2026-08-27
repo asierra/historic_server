@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pebble import ProcessPool, ThreadPool
 from concurrent.futures import TimeoutError, as_completed
 from settings import settings
+import horarios
 
 
 class S3CircuitBreaker:
@@ -129,9 +130,12 @@ class S3RecoverFiles:
                 raise ValueError(f"Formato de fecha no soportado: {fecha_jjj}")
             
             for horario_str in horarios_list:
-                inicio_hh = int(horario_str.split(':')[0])
-                fin_hh = int(horario_str.split('-')[1].split(':')[0]) if '-' in horario_str else inicio_hh
-                for hora in range(inicio_hh, fin_hh + 1):
+                try:
+                    horas_del_rango = horarios.horas_cubiertas(horario_str)
+                except ValueError:
+                    self.logger.warning(f"Formato de horario inválido: {horario_str}. Se omite.")
+                    continue
+                for hora in horas_del_rango:
                     for s3_product_name in s3_product_names:
                         s3_path_hora = f"{s3_bucket}/{s3_product_name}/{anio}/{dia_juliano}/{hora:02d}/"
                         try:
@@ -336,14 +340,7 @@ class S3RecoverFiles:
             minuto = ts_str[9:11]
             if anio + dia_juliano != fecha_jjj:
                 continue
-            archivo_hm = int(hora) * 60 + int(minuto)
-            for horario_str in horarios_list:
-                partes = horario_str.split('-')
-                inicio = partes[0]
-                fin = partes[1] if len(partes) > 1 else inicio
-                inicio_hm = int(inicio[:2]) * 60 + int(inicio[3:5])
-                fin_hm = int(fin[:2]) * 60 + int(fin[3:5])
-                if inicio_hm <= archivo_hm <= fin_hm:
-                    archivos_filtrados.append(archivo)
-                    break
+            archivo_hm = horarios.minuto_de_archivo(hora, minuto)
+            if horarios.alguna_contiene(horarios_list, archivo_hm):
+                archivos_filtrados.append(archivo)
         return archivos_filtrados

@@ -13,6 +13,7 @@ from collections import defaultdict
 import time
 from s3_recover import S3RecoverFiles
 from config import SatelliteConfigGOES
+import horarios
 from settings import settings
 
 from settings import settings
@@ -30,14 +31,6 @@ def filter_files_by_time(archivos_nc: list, fecha_jjj: str, horarios_list: list)
     Filtra archivos NetCDF por fecha juliana y rango horario.
     Compatible con archivos S3 (string) y rutas locales NetCDF.
     """
-    # Pre-compilar los rangos horarios para una búsqueda más eficiente
-    rangos_validos = []
-    for horario_str in horarios_list:
-        partes = horario_str.split('-')
-        inicio_hm = int(partes[0].replace(':', ''))
-        fin_hm = int(partes[1].replace(':', '')) if len(partes) > 1 else inicio_hm
-        rangos_validos.append((inicio_hm, fin_hm))
-
     archivos_filtrados = []
     for archivo in archivos_nc:
         nombre = archivo.name if hasattr(archivo, "name") else archivo
@@ -45,8 +38,8 @@ def filter_files_by_time(archivos_nc: list, fecha_jjj: str, horarios_list: list)
         if match:
             anio, dia_juliano, hora, minuto = match.groups()
             if anio + dia_juliano == fecha_jjj:
-                archivo_hm = int(hora + minuto)
-                if any(inicio <= archivo_hm <= fin for inicio, fin in rangos_validos):
+                archivo_min = horarios.minuto_de_archivo(hora, minuto)
+                if horarios.alguna_contiene(horarios_list, archivo_min):
                     archivos_filtrados.append(archivo)
     return archivos_filtrados
 
@@ -78,30 +71,33 @@ class LustreRecoverFiles:
         return archivos_candidatos
 
     def filter_files_by_time(self, archivos_candidatos: List[Path], fecha_jjj: str, horarios_list: List[str]) -> List[Path]:
-        archivos_filtrados_dia = []
+        ventanas = []
         for horario_str in horarios_list:
-            partes = horario_str.split('-')
-            inicio_hhmm = partes[0].replace(':', '')
-            fin_hhmm = partes[1].replace(':', '') if len(partes) > 1 else inicio_hhmm
-            inicio_ts_str = f"{fecha_jjj}{inicio_hhmm}"
-            fin_ts_str = f"{fecha_jjj}{fin_hhmm}"
             try:
-                inicio_ts = int(inicio_ts_str)
-                fin_ts = int(fin_ts_str)
+                horarios.parsear(horario_str)
             except ValueError:
-                self.logger.warning(f"Formato de timestamp inválido para {fecha_jjj} con horario {horario_str}. Se omite.")
+                self.logger.warning(f"Formato de horario inválido para {fecha_jjj}: {horario_str}. Se omite.")
                 continue
-            self.logger.debug(f"    Filtrando por rango horario: {horario_str} ({inicio_ts} - {fin_ts})")
-            for archivo in archivos_candidatos:
-                try:
-                    s_part_start_idx = archivo.name.find('-s')
-                    if s_part_start_idx != -1:
-                        file_ts_str = archivo.name[s_part_start_idx + 2 : s_part_start_idx + 13]
-                        file_ts = int(file_ts_str)
-                        if inicio_ts <= file_ts <= fin_ts:
-                            archivos_filtrados_dia.append(archivo)
-                except (ValueError, IndexError, AttributeError):
+            ventanas.append(horario_str)
+        if not ventanas:
+            return []
+        self.logger.debug(f"    Filtrando por rangos horarios: {ventanas}")
+
+        archivos_filtrados_dia = []
+        for archivo in archivos_candidatos:
+            try:
+                s_part_start_idx = archivo.name.find('-s')
+                if s_part_start_idx == -1:
                     continue
+                # sYYYYJJJHHMM: los candidatos ya vienen acotados al día.
+                file_ts_str = archivo.name[s_part_start_idx + 2 : s_part_start_idx + 13]
+                if len(file_ts_str) < 11:
+                    continue
+                archivo_min = horarios.minuto_de_archivo(file_ts_str[7:9], file_ts_str[9:11])
+            except (ValueError, IndexError, AttributeError):
+                continue
+            if horarios.alguna_contiene(ventanas, archivo_min):
+                archivos_filtrados_dia.append(archivo)
         return archivos_filtrados_dia
 
     def discover_and_filter_files(self, query_dict: Dict) -> List[Path]:
@@ -368,13 +364,10 @@ class RecoverFiles:
                     if not (start_date_str <= fecha_fallida_ymd <= end_date_str):
                         continue
 
+                    archivo_min = (fecha_fallida_dt.hour * 60) + fecha_fallida_dt.minute
                     for horario_rango in horarios_list:
                         # Comprobar si la hora del archivo está dentro del rango horario.
-                        inicio_str, fin_str = (horario_rango.split('-') + [horario_rango])[:2]
-                        inicio_t = datetime.strptime(inicio_str, '%H:%M').time()
-                        fin_t = datetime.strptime(fin_str, '%H:%M').time()
-
-                        if inicio_t <= fecha_fallida_dt.time() <= fin_t:
+                        if horarios.alguna_contiene([horario_rango], archivo_min):
                             if horario_rango not in fechas_fallidas[fecha_key_original]:
                                 fechas_fallidas[fecha_key_original].append(horario_rango)
                             break # Encontrado el rango horario, pasar al siguiente archivo.
