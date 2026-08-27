@@ -88,6 +88,7 @@ INVALID_SATELLITE_REQUEST = {
     "sat": "METEOSAT-9",
     "nivel": "L2",
     "dominio": "fd",
+    "productos": ["ACHA"],  # el esquema exige al menos una banda o un producto
     "fechas": { "20231026": ["00:00"] }
 }
 
@@ -118,6 +119,27 @@ def test_validate_success():
     assert "archivos_estimados" in data
     assert "tamanio_estimado_mb" in data
 
+def test_validate_acepta_el_payload_que_manda_historic_query():
+    """El payload real de Django, con su 'id' de correlación.
+
+    build_query_processor_payload() (historic_query/historic/utils.py) agrega
+    payload['id'] = consulta_id en CADA envío. Cuando se empezó a aplicar el
+    esquema, 'id' no estaba declarado y additionalProperties:false lo rechazaba:
+    habría devuelto 422 a todas las consultas de Django. La validación del propio
+    Django no lo detecta, porque allá se valida query.json antes de agregar el id.
+    """
+    payload = {
+        "id": "Ab3xK9zQ",
+        "nivel": "L1b",
+        "dominio": "fd",
+        "creado_por": "quien@ejemplo.mx",
+        "bandas": ["01"],
+        "fechas": {"20231026": ["10:00-12:00"]},
+    }
+    response = client.post("/validate", json=payload)
+    assert response.status_code == 200, response.text
+
+
 def test_validate_invalid_satellite():
     """Prueba que una solicitud con un satélite no soportado falla."""
     response = client.post("/validate", json=INVALID_SATELLITE_REQUEST)
@@ -125,18 +147,30 @@ def test_validate_invalid_satellite():
     assert "Satélite 'METEOSAT-9' no es soportado o es inválido" in response.json()["detail"]
 
 def test_validate_invalid_band():
-    """Prueba que una solicitud con una banda inválida falla."""
+    """Una banda inexistente la rechaza el esquema, antes que validate_bandas.
+
+    Antes daba 400 desde el ValueError de validate_bandas; ahora da 422 desde el
+    enum del esquema, que es la misma clase de error que cualquier otra
+    violación del contrato. Para historic_query es indistinto: trata 400 y 422
+    igual, ambos son veredicto de validación.
+    """
     response = client.post("/validate", json=INVALID_BAND_REQUEST)
-    assert response.status_code == 400 # La excepción ValueError se convierte en 400
-    assert "Bandas inválidas: ['99']" in response.json()["detail"]
+    assert response.status_code == 422
+    assert "99" in response.text
+    assert "bandas" in response.text
 
 def test_validate_missing_required_field():
-    """Prueba que una solicitud sin el campo 'fechas' falla (error 422 de Pydantic)."""
+    """Sin 'fechas' falla con 422, ahora desde el esquema y no desde Pydantic.
+
+    El detalle conserva la forma loc/msg que ya producía Pydantic, porque
+    historic_query la parsea para armar el mensaje al usuario (utils.py, _fmt).
+    """
     response = client.post("/validate", json=MISSING_FECHAS_REQUEST)
-    assert response.status_code == 422 # Unprocessable Entity
-    data = response.json()
-    assert data["detail"][0]["msg"] == "Field required" # Pydantic v2 message
-    assert data["detail"][0]["loc"] == ["fechas"]
+    assert response.status_code == 422
+    detalle = response.json()["detail"]
+    assert isinstance(detalle, list) and detalle
+    assert all({"loc", "msg"} <= set(d) for d in detalle)
+    assert any("fechas" in d["msg"] for d in detalle)
 
 def test_validate_l2_acha_without_bandas_is_valid():
     """Nivel L2 con ACHA no requiere 'bandas'."""
@@ -159,6 +193,7 @@ def test_validate_future_date_is_invalid():
         "sat": "GOES-16",
         "nivel": "L1b",
         "dominio": "fd",
+        "bandas": ["01"],  # el esquema exige al menos una banda o un producto
         "fechas": { "20990101": ["12:00"] } # Fecha lejana en el futuro
     }
     response = client.post("/validate", json=future_date_request)
@@ -176,7 +211,9 @@ def test_validate_rejects_string_all_for_bandas():
     }
     response = client.post("/validate", json=request_with_string_all)
     assert response.status_code == 422 # Unprocessable Entity
-    assert "Input should be a valid list" in response.text
+    # Antes lo rechazaba Pydantic ("Input should be a valid list"); ahora el
+    # esquema, que ya no admite la forma de cadena en ninguna de sus ramas.
+    assert "is not of type 'array'" in response.text
 
 def test_validate_accepts_list_all_for_bandas():
     """Prueba que una solicitud con 'bandas': ['ALL'] (lista) es aceptada."""

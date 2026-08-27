@@ -1,6 +1,14 @@
 from typing import List, Dict, Any
 from config_base import SatelliteConfigBase
 from datetime import datetime, timedelta, time
+import logging
+
+log = logging.getLogger(__name__)
+
+# get_periodicity se llama dentro de bucles anidados (fecha x horario x item), asi
+# que avisar en cada fallback inundaria el log. Se avisa una vez por combinacion
+# y por proceso; el conjunto esta acotado por el numero de items distintos.
+_PERIODICIDAD_AVISADA = set()
 
 class SatelliteConfigGOES(SatelliteConfigBase):
     """Configuration specific to GOES satellites."""
@@ -191,11 +199,24 @@ class SatelliteConfigGOES(SatelliteConfigBase):
         try:
             return self.GOES_PERIODICITY[nivel][dominio][item]
         except KeyError:
-            # Si no encontramos el item específico, usar periodicidad por defecto
-            if dominio == 'fd':
-                return 10  # Default para Full Disk
-            else:  # conus
-                return 5   # Default para CONUS
+            # El default es la cadencia **L1b**, y para un producto L2 infrecuente
+            # eso sobreestima mucho: un NDVI diario contado cada 10 minutos son 144
+            # archivos en vez de 1. La cifra no es cosmetica — alimenta los limites
+            # de main.py (413 por archivos, 413 por tamanio, 507 por espacio) y los
+            # umbrales de automatizacion de historic_query, asi que una consulta
+            # pequeña puede terminar rechazada. Se avisa para que deje de ser
+            # invisible mientras no haya periodicidad real para esos productos.
+            por_omision = 10 if dominio == 'fd' else 5
+            clave = (nivel, dominio, item)
+            if clave not in _PERIODICIDAD_AVISADA:
+                _PERIODICIDAD_AVISADA.add(clave)
+                log.warning(
+                    "Sin periodicidad para nivel=%s dominio=%s item=%s; se usa el "
+                    "default de %d min (cadencia L1b). La estimacion de este item "
+                    "puede quedar muy por encima de la realidad.",
+                    nivel, dominio, item, por_omision,
+                )
+            return por_omision
 
     def get_file_weight(self, nivel: str, dominio: str, item: str) -> float:
         """

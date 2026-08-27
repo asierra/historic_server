@@ -9,3 +9,4 @@ requests
 httpx
 pydantic-settings
 structlog
+jsonschema

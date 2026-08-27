@@ -5,6 +5,11 @@
   "description": "Contrato de la consulta histórica. Fuente de verdad: este archivo. historic_query mantiene una copia en historic/schema/ y no debe editarla.",
   "type": "object",
   "properties": {
+    "id": {
+      "type": "string",
+      "maxLength": 100,
+      "description": "Identificador de correlación que asigna el cliente. historic_query manda aquí su consulta_id (8 caracteres alfanuméricos) en cada POST /query."
+    },
     "sat": {
       "type": "string",
       "description": "Nombre del satélite (ej. GOES-16, GOES-18)"

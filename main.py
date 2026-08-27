@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 import logging
 import structlog
 from pydantic import ValidationError
+from esquema import errores_de_esquema
 from config import SatelliteConfigGOES
 import uvicorn
 import shutil
@@ -282,13 +283,23 @@ def _validate_and_prepare_request(request_data: Dict[str, Any]) -> Tuple[Dict[st
     Levanta HTTPException en caso de error.
     Devuelve (datos_validados, clase_de_configuracion).
     """
-    # 1. Validar la estructura básica con Pydantic
+    # 1. Validar contra el contrato. historic_query_schema.json era hasta ahora un
+    #    documento que nada aplicaba: lo unico que corria era el modelo Pydantic
+    #    de abajo, mas laxo (fechas: Dict[str, List[str]] no valida ni las claves
+    #    ni los horarios, asi que una clave como '-20260101' pasaba entera).
+    problemas = errores_de_esquema(request_data)
+    if problemas:
+        raise HTTPException(status_code=422, detail=problemas)
+
+    # 2. Estructura tipada para el resto de la funcion. Pydantic sigue siendo mas
+    #    laxo que el esquema en 'nivel' y mas estricto en 'dominio'; alinearlo
+    #    toca justo los dos campos que cambia el soporte de satelites polares.
     try:
         request = HistoricQueryRequest(**request_data)
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors())
 
-    # 2. Determinar la configuración correcta
+    # 3. Determinar la configuración correcta
     sat_name = request.sat or AVAILABLE_SATELLITE_CONFIGS["GOES"].DEFAULT_SATELLITE
     config = None
     if sat_name.startswith("GOES"):
@@ -297,7 +308,7 @@ def _validate_and_prepare_request(request_data: Dict[str, Any]) -> Tuple[Dict[st
     if not config:
         raise HTTPException(status_code=400, detail=f"Satélite '{sat_name}' no es soportado o es inválido.")
 
-    # 2.1. Validar fecha futura ANTES de procesar
+    # 3.1. Validar fecha futura ANTES de procesar
     today = datetime.now().date()
     for fecha_str in request_data.get('fechas', {}).keys():
         fecha_a_validar_str = fecha_str.split('-')[-1]
