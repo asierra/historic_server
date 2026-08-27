@@ -35,8 +35,8 @@ class Settings(BaseSettings):
 
     # S3 / GOES operational settings
     goes19_operational_date: str = Field(
-        "2025-04-01",
-        description="Date (YYYY-MM-DD UTC) from which GOES-East maps to GOES-19 (G19) instead of GOES-16 (G16)."
+        "2025-04-07",
+        description="Date (YYYY-MM-DD UTC) from which the GOES-East alias maps to GOES-19 (G19) instead of GOES-16 (G16). NOAA declared GOES-19 operational as GOES-East on 2025-04-07 at 15:00 UTC; this setting is day-granular, so 7 Apr resolves entirely to G19 even though its first 15 hours are G16. Only the GOES-EAST alias consults this date: a request naming GOES-16 or GOES-19 explicitly bypasses it, which is how the 1-7 Apr overlap (both satellites publishing) stays reachable."
     )
 
     # S3 Specific Settings

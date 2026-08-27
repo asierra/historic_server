@@ -51,7 +51,7 @@ La aplicación se configura mediante variables de entorno:
 | `SIM_LOCAL_SUCCESS_RATE`        | Tasa de éxito local en modo simulador (0.0–1.0)                          | `0.8`               |
 | `SIM_S3_SUCCESS_RATE`           | Tasa de éxito S3 en modo simulador (0.0–1.0)                             | `0.5`               |
 | `SOURCE_PATH`                   | Ruta raíz del almacenamiento primario (Lustre)                          | `/depot/goes16`     |
-| `GOES19_OPERATIONAL_DATE`       | Fecha (YYYY-MM-DD UTC) desde la que GOES-East corresponde a GOES-19      | `2025-04-01`        |
+| `GOES19_OPERATIONAL_DATE`       | Fecha (YYYY-MM-DD UTC) desde la que el alias GOES-East corresponde a GOES-19 | `2025-04-07`        |
 
 ### Perfiles de entorno (.env)
 ```ini
