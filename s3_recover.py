@@ -18,9 +18,19 @@ class S3CircuitBreaker:
     Estado compartido entre todos los workers del ThreadPool.
     - closed:    operación normal, las llamadas se ejecutan.
     - open:      S3 está fallando; las llamadas se rechazan de inmediato.
-    - half-open: tras `recovery_timeout` segundos, permite una prueba.
+    - half-open: tras `recovery_timeout` segundos, las llamadas vuelven a pasar.
 
-    Si la prueba falla vuelve a 'open'; si tiene éxito vuelve a 'closed'.
+    En half-open, el primer fallo reabre el circuito en el acto — basta uno,
+    frente a los `failure_threshold` que hacen falta desde 'closed'—; un éxito
+    cierra y reinicia el contador.
+
+    OJO — esto NO es el patrón canónico. El patrón limita half-open a **una
+    sola** llamada de prueba; aquí `is_open` devuelve `state == "open"`, así que
+    al pasar a half-open deja de bloquear a todos los workers a la vez: con
+    `max_workers=8` pasan los ocho. La estampida está acotada a un intento por
+    worker —el primer fallo reabre y el bucle de reintentos vuelve a consultar
+    `is_open`—, pero no es una prueba única. Ver B11 en el `notas_sistema.md`
+    de historic_query.
     """
 
     def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 60):
