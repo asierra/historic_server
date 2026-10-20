@@ -17,7 +17,7 @@ cp .env.example .env
 # Run (dev)
 python main.py                      # uvicorn on 0.0.0.0:9041
 # Run (prod-style, matches server.sh / historic-server.service)
-gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:9041
+gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 127.0.0.1:9041 --bind 172.16.X.X:9041   # nunca 0.0.0.0 en producción
 ./server.sh {start|stop|restart|status}   # kills existing gunicorn/uvicorn first, then backgrounds via nohup
 
 # Tests

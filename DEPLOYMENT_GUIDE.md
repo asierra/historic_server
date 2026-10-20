@@ -298,7 +298,7 @@ source venv/bin/activate
 gunicorn main:app \
     --workers 4 \
     --worker-class uvicorn.workers.UvicornWorker \
-    --bind 0.0.0.0:9041 \
+    --bind 127.0.0.1:9041 --bind 172.16.X.X:9041 \
     --access-logfile - \
     --error-logfile server.log \
     --log-level info
@@ -331,7 +331,9 @@ Para que la aplicación se ejecute de forma persistente como un servicio del sis
     # Carga las variables de entorno desde un archivo .env. La ruta es absoluta.
     EnvironmentFile=/opt/historic_server/.env
     
-    ExecStart=/opt/historic_server/.venv/bin/gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:9041
+    # Sólo localhost y red interna (172.16.X.X = IP interna del servidor). Nunca 0.0.0.0:
+    # la API key es opcional y no cubre todos los endpoints.
+    ExecStart=/opt/historic_server/.venv/bin/gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 127.0.0.1:9041 --bind 172.16.X.X:9041
 
     Restart=always
     RestartSec=5s

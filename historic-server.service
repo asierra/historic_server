@@ -10,7 +10,10 @@ WorkingDirectory=/opt/historic_server
 EnvironmentFile=/opt/historic_server/.env
 
 # Nota: Ajusta la ruta del venv según tu instalación (venv o .venv)
-ExecStart=/opt/historic_server/.venv/bin/gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:9041
+# Escuchar SOLO en localhost y en la red interna, nunca en 0.0.0.0: la API key es
+# opcional y no cubre todos los endpoints. 172.16.X.X = IP interna del servidor,
+# la misma que usa QUERY_PROCESSOR_URL del orquestador.
+ExecStart=/opt/historic_server/.venv/bin/gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 127.0.0.1:9041 --bind 172.16.X.X:9041
 
 Restart=always
 RestartSec=5s
