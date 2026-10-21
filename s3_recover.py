@@ -244,7 +244,13 @@ class S3RecoverFiles:
 
         # Normalizar objetivos únicos
         objetivos_unicos = list(set(archivos_s3))
-        total_obj = len(objetivos_unicos) or 1
+        if not objetivos_unicos:
+            # Lo normal cuando Lustre ya entregó todo. Antes salía como
+            # «1/1 ya presentes»: el `or 1` que evita dividir entre cero se
+            # colaba en el mensaje.
+            self.logger.info(f"S3: nada que pedir (consulta_id={consulta_id})")
+            return [], []
+        total_obj = len(objetivos_unicos)
         update_every = settings.S3_PROGRESS_STEP
 
         # Pre-contar archivos ya existentes para reflejar progreso real tras reinicio
@@ -269,9 +275,13 @@ class S3RecoverFiles:
         except Exception:
             local_nc_count = len(existentes)
 
-        # Usar el mayor entre los que coinciden con objetivos y los .nc locales, pero sin exceder total_obj
+        # Usar el mayor entre los que coinciden con objetivos y los .nc locales, pero sin exceder total_obj.
+        # Sólo para la barra de progreso: los mensajes del journal usan los conteos exactos de abajo.
         completados = min(max(len(existentes), local_nc_count), total_obj)
-        ok_count = len(existentes)
+        # ok_count cuenta sólo lo que se baja en esta corrida. Antes arrancaba
+        # en len(existentes), y «S3 finalizado: N ok» sumaba lo que había
+        # puesto Lustre.
+        ok_count = 0
         fail_count = 0
 
         # Publicar un estado inicial con el progreso basado en archivos ya presentes
@@ -287,7 +297,7 @@ class S3RecoverFiles:
         # Si no hay pendientes, retornar de inmediato
         if not pendientes:
             self.logger.info(
-                f"S3: no hay descargas pendientes; {completados}/{total_obj} ya presentes, "
+                f"S3: no hay descargas pendientes; los {total_obj} objetivos ya están en destino, "
                 f"{len(s3_recuperados_set)} de ellos bajados por S3 en una corrida previa (consulta_id={consulta_id})"
             )
             return list(s3_recuperados_set), objetivos_aun_fallidos
@@ -329,13 +339,14 @@ class S3RecoverFiles:
                         # Log resumen cada corte
                         try:
                             self.logger.info(
-                                f"S3 progreso: {completados}/{total_obj} (ok: {ok_count}, fail: {fail_count}) (consulta_id={consulta_id})"
+                                f"S3 progreso: {completados}/{total_obj} (bajados: {ok_count}, fallidos: {fail_count}) (consulta_id={consulta_id})"
                             )
                         except Exception:
                             pass
         # Log resumen final
         self.logger.info(
-            f"S3 finalizado: {ok_count} ok, {fail_count} fallos de {total_obj} objetivos (consulta_id={consulta_id})"
+            f"S3 finalizado: {total_obj} objetivos; {ok_count} bajados ahora, {len(existentes)} ya en destino, "
+            f"{fail_count} fallidos (consulta_id={consulta_id})"
         )
         return list(s3_recuperados_set), objetivos_aun_fallidos
 

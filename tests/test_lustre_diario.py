@@ -395,3 +395,32 @@ def test_los_temporales_de_una_corrida_interrumpida_se_barren(arboles, tmp_path)
 
     assert sorted(p.name for p in destino.iterdir()) == [L1B_10]
     assert r["total_archivos"] == 1
+
+
+def test_el_journal_no_inventa_objetivos_cuando_lustre_lo_dio_todo(arboles, tmp_path, nube, caplog):
+    """Visto en tahan (`Zclm220f`, `nqkrZxyO`): con 0 objetivos el log decía
+    «1/1 ya presentes», por el `or 1` que evita dividir entre cero."""
+    _, diario = arboles
+    _dia_l1b(diario, "2026291", bandas=("10",), horas=("0000",))
+    nube([_remoto(L1B_10)])
+
+    with caplog.at_level(logging.INFO, logger="recover"):
+        _correr(arboles, tmp_path, "LOGNADA1", Q_L1B_10)
+
+    mensajes = [r.getMessage() for r in caplog.records if r.getMessage().startswith("S3")]
+    assert mensajes == ["S3: nada que pedir (consulta_id=LOGNADA1)"]
+
+
+def test_el_journal_separa_lo_bajado_de_lo_que_ya_estaba(arboles, tmp_path, nube, caplog):
+    """El «ok» del resumen final contaba también lo que había puesto Lustre."""
+    otro = _nc_l1b("C", "10", "2026291", "0005")
+    destino = tmp_path / "descargas" / "LOGMIX01"
+    destino.mkdir(parents=True)
+    (destino / otro).write_bytes(b"de antes")  # en destino, pero no en el registro de S3
+    nube([_remoto(L1B_10), _remoto(otro)])
+
+    with caplog.at_level(logging.INFO, logger="recover"):
+        _correr(arboles, tmp_path, "LOGMIX01", Q_L1B_10)
+
+    final = [r.getMessage() for r in caplog.records if r.getMessage().startswith("S3 finalizado")]
+    assert final == ["S3 finalizado: 2 objetivos; 1 bajados ahora, 1 ya en destino, 0 fallidos (consulta_id=LOGMIX01)"]
