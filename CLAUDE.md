@@ -30,6 +30,10 @@ pytest tests/test_circuit_breaker.py::test_name  # one test
 python migrate_db.py [path_to_db]    # idempotent schema migration, backs up the .db file first
 python tools/get_query.py <consulta_id> [--db PATH] [--original]
 python tools/diff_queries.py --base A.json --excluir B.json --out C.json
+
+# One-off: move all of 2026 into Lustre's daily tree. Runs on cirrus as lanotadm,
+# Python 3.6, dry-run unless --ejecutar. See its docstring.
+python3 tools/migrar_2026.py [--solo l1b/conus] [--dias 001-083] [--ejecutar] [--procesos N]
 ```
 
 CI (`.github/workflows/ci.yml`) runs `pytest -q -m "not real_io"` — the same command you should run locally before pushing. It selects by marker on purpose: the previous version named files at the repo root, which stopped existing when the suite moved into `tests/` in `2331cc6` (2025-10-31), so CI failed on every push for 25 commits without anyone reading it. Don't reintroduce a file list. The suite needs no real storage (fixtures monkeypatch `SOURCE_PATH`/`DOWNLOAD_PATH`), so it passes on a bare runner.
