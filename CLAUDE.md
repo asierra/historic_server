@@ -90,24 +90,24 @@ nothing drains.
 ### Open work
 Tracked in `../historic_query/pendientes.md` §0-ter (the operational log lives in that repo).
 
-For this one, the big one is **`PLAN_COLA_DURABLE.md`**: turning `consultas` into a lease-based
-queue so orphaned work resumes on its own. **Entrega 1 is done** — the schema (four columns + an
-index) and the primitives in `ConsultasDatabase` (`reclamar_siguiente`, `liberar_expiradas`,
-`fallar_con_reintento`, `reencolar`), covered by `tests/test_cola.py`. Nothing calls them yet, so
-runtime behavior is unchanged and it can ship on its own.
+`PLAN_COLA_DURABLE.md` is implemented and **running on tahan since 2026-10-20** — entrega 1
+(`5b8fccc`: schema + primitives in `ConsultasDatabase`) and entrega 2 (`3da66d6`:
+`cola.BucleDeCola` in a thread off `lifespan`, described in the states section above); the queue
+columns are migrated and `/health` reports `hilo_vivo: true`. What isn't recorded anywhere is §7's
+acceptance step 4: restarting on purpose mid-download and watching the query resume on its own
+within one lease. Until that's done, the recovery path is only covered by `tests/test_cola.py`.
 
-Entrega 2 is the actual cut and is still pending, but its shape is settled: **§6 was decided on
-2026-08-25 in favour of a single service** — the queue loop runs in a thread off the API's own
-`lifespan`, no `worker.py` and no new systemd unit. Decided on tahan's numbers (4 restarts in 6
-months, one of which is what froze `GkpH6xne`): splitting the processes would buy ~30 min a year
-against a new unit whose silent-failure mode has a precedent on that same machine. §6 keeps the
-reasoning and what would reverse it.
+§6 (single service, no `worker.py`, no new systemd unit) was decided on 2026-08-25 on tahan's
+numbers (4 restarts in 6 months, one of which froze `GkpH6xne`): splitting the processes would buy
+~30 min a year against a new unit whose silent-failure mode has a precedent on that same machine.
+§6 keeps the reasoning and what would reverse it.
 
-That plan supersedes the old "startup rescue in `lifespan`" idea, which it lists as a discarded
-alternative (§10): it re-queues orphans but leaves intact the thing that causes them, namely that
-deploying the API kills in-flight downloads.
+The old "startup rescue in `lifespan`" idea is superseded and should not be built (§10 of the plan
+lists it as discarded): it re-queues orphans but leaves intact the thing that causes them, namely
+that deploying the API kills in-flight downloads.
 
-Also open: no test coverage for the 413 quota rejection.
+Also open: no test coverage for the 413 quota rejection. `tests/test_api.py` mentions 413 only in a
+test that *disables* the quotas (`MAX_SIZE_MB_PER_QUERY = 0`) — it doesn't exercise the rejection.
 
 ### Storage backend (the pending sqlite→postgres migration)
 `database.py`'s `ConsultasDatabase` is a hand-written SQLite wrapper (no ORM) using **WAL journal mode** for reader/writer concurrency, with a single `consultas` table (id, estado, query JSON blob, resultados JSON blob, progreso, mensaje, timestamps, usuario, plus the queue columns `intentos`/`lease_hasta`/`worker_id`/`disponible_desde` — declared once in `database.py`'s `COLUMNAS_COLA` and reused by `migrate_db.py` so the two paths can't drift). All queries are raw `sqlite3` calls with manual `try/except` + logging per method — there's no connection pooling or migrations framework; `migrate_db.py` is a standalone imperative script that inspects `PRAGMA table_info` and `ALTER TABLE`s as needed, run manually (not on app startup). A move to Postgres would need to replace this whole module (and `migrate_db.py`) since nothing here is DB-agnostic (raw SQL strings, sqlite-specific `PRAGMA` calls, file-path-based `DB_PATH` config). Given the low write/read volume (single client today), this has been deprioritized — revisit if concurrent multi-client access becomes real.
