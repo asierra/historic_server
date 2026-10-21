@@ -10,6 +10,11 @@ class Settings(BaseSettings):
     processor_mode: str = Field("real", description="Processing mode: 'real' or 'simulator'.")
     db_path: Path = Field("consultas_goes.db", description="Path to the SQLite database file.")
     source_path: Path = Field("/depot/goes16", description="Root path of the primary storage (e.g., Lustre).")
+    source_path_diario: Path = Field(
+        "/depot/goes-east",
+        description="Root of the daily Lustre tree: {nivel}/{sensor}/{dominio}/YYYY/DDD/*.nc (loose files, L2 split into one folder per product). Used from LAYOUT_DIARIO_DESDE_ANIO on; days not found there fall back to SOURCE_PATH's weekly .tgz tree while the migration lasts."
+    )
+    layout_diario_desde_anio: int = Field(2026, description="First year searched in SOURCE_PATH_DIARIO before SOURCE_PATH.")
     download_path: Path = Field("/data/tmp", description="Directory for query downloads.")
     max_workers: int = Field(8, description="Number of parallel I/O workers.")
     s3_enabled: bool = Field(

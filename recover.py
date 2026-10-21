@@ -16,8 +16,6 @@ from config import SatelliteConfigGOES
 import horarios
 from settings import settings
 
-from settings import settings
-
 # Instanciar configuración para referenciar listas válidas (bandas/productos)
 _SAT_CONFIG = SatelliteConfigGOES()
 
@@ -43,11 +41,99 @@ def filter_files_by_time(archivos_nc: list, fecha_jjj: str, horarios_list: list)
                     archivos_filtrados.append(archivo)
     return archivos_filtrados
 
+# Timestamp de inicio en los dos formatos de nombre que hay en Lustre:
+# `...G19-s20260760746.tgz` (árbol semanal) y `..._G19_s20262930001177_...nc`
+# (árbol diario, y también S3). Captura AAAA, JJJ, HH, MM.
+_LUSTRE_TIMESTAMP_RE = re.compile(r'[-_]s(\d{4})(\d{3})(\d{2})(\d{2})')
+
+# Letra de dominio con la que terminan las carpetas de producto del árbol
+# diario de L2 (`ACHAC`, `CMIPF-C13`).
+_LETRA_DOMINIO = {"conus": "C", "fd": "F"}
+
+
 # --- Clase para recuperación local (Lustre) ---
 class LustreRecoverFiles:
-    def __init__(self, source_data_path: str, logger):
+    """Busca archivos en los dos árboles de Lustre.
+
+    - **Semanal** (`SOURCE_PATH`, p. ej. /depot/goes16):
+      `{sensor}/{nivel}/{dominio}/AAAA/SS/*.tgz`, con SS = semana del año.
+      Es el acervo histórico.
+    - **Diario** (`SOURCE_PATH_DIARIO`, p. ej. /depot/goes-east):
+      `{nivel}/{sensor}/{dominio}/AAAA/JJJ/`, con `.nc` sueltos. En L1b están
+      todas las bandas juntas; en L2 hay una subcarpeta por producto
+      (`ACHAC`, `CMIPC-C13`). Rige desde `LAYOUT_DIARIO_DESDE_ANIO`.
+
+    Desde ese año se busca primero en el diario y, si el día no está ahí,
+    en el semanal: mientras dura la migración hay días que sólo existen en
+    el árbol viejo. Una vez migrado todo, ese respaldo deja de encontrar
+    nada y no estorba.
+    """
+
+    def __init__(self, source_data_path: str, logger, source_path_diario: Optional[str] = None, diario_desde_anio: Optional[int] = None):
         self.source_data_path = Path(source_data_path)
+        self.source_path_diario = Path(source_path_diario or settings.source_path_diario)
+        self.diario_desde_anio = diario_desde_anio or settings.layout_diario_desde_anio
         self.logger = logger
+
+    def raices_para(self, query_dict: Dict) -> List[Path]:
+        """Las raíces que una consulta puede tocar, según sus fechas."""
+        anios = {int(f[:4]) for f in query_dict.get('fechas', {})}
+        raices = []
+        if any(a >= self.diario_desde_anio for a in anios):
+            raices.append(self.source_path_diario)
+        # El semanal siempre puede hacer falta: para años previos, o como
+        # respaldo de un día que todavía no se migra.
+        raices.append(self.source_data_path)
+        return raices
+
+    def build_base_path_diario(self, query_dict: Dict) -> Path:
+        base_path = self.source_path_diario
+        base_path /= query_dict.get('nivel', 'l1b').lower()
+        base_path /= query_dict.get('sensor', 'abi').lower()
+        if query_dict.get('dominio'):
+            base_path /= query_dict['dominio'].lower()
+        return base_path
+
+    def find_files_for_day_diario(self, query_dict: Dict, fecha_jjj: str) -> Optional[List[Path]]:
+        """Los `.nc` del día en el árbol diario que piden bandas y productos.
+
+        Devuelve None si el día no está en el árbol (para caer al semanal) y
+        una lista, quizá vacía, si está. La selección por banda/producto se
+        hace aquí, por nombre: lo que antes decidía qué miembros extraer del
+        .tgz ahora decide qué archivos o carpetas leer.
+        """
+        directorio_dia = self.build_base_path_diario(query_dict) / fecha_jjj[:4] / fecha_jjj[4:]
+        if not directorio_dia.is_dir():
+            return None
+
+        nivel = (query_dict.get('nivel') or '').upper()
+        bandas = {str(b) for b in (query_dict.get('bandas') or [])}
+        todas_las_bandas = not bandas or 'ALL' in bandas
+
+        if nivel == 'L1B':
+            return [
+                f for f in directorio_dia.iterdir()
+                if f.suffix == '.nc' and (todas_las_bandas or any(f"C{b}_" in f.name for b in bandas))
+            ]
+
+        productos = {str(p).upper() for p in (query_dict.get('productos') or [])}
+        todos_los_productos = 'ALL' in productos
+        letra = _LETRA_DOMINIO.get((query_dict.get('dominio') or '').lower(), '')
+        archivos = []
+        for carpeta in directorio_dia.iterdir():
+            if not carpeta.is_dir():
+                continue
+            # `CMIPC-C13` -> producto `CMIP`, banda `13`; `ACHAC` -> `ACHA`.
+            base, _, banda = carpeta.name.partition('-C')
+            producto = base[:-1] if letra and base.endswith(letra) else base
+            if not (todos_los_productos or producto in productos):
+                continue
+            # La banda sólo filtra en CMI*; en DMW es parte del producto y la
+            # consulta no la pide (main.py rechaza bandas fuera de CMI*).
+            if banda and producto.startswith('CMI') and not todas_las_bandas and banda not in bandas:
+                continue
+            archivos.extend(f for f in carpeta.iterdir() if f.suffix == '.nc')
+        return archivos
 
     def build_base_path(self, query_dict: Dict) -> Path:
         base_path = self.source_data_path
@@ -85,16 +171,13 @@ class LustreRecoverFiles:
 
         archivos_filtrados_dia = []
         for archivo in archivos_candidatos:
+            # sAAAAJJJHHMM, con `-s` en los .tgz y `_s` en los .nc.
+            m = _LUSTRE_TIMESTAMP_RE.search(archivo.name)
+            if not m or m.group(1) + m.group(2) != fecha_jjj:
+                continue
             try:
-                s_part_start_idx = archivo.name.find('-s')
-                if s_part_start_idx == -1:
-                    continue
-                # sYYYYJJJHHMM: los candidatos ya vienen acotados al día.
-                file_ts_str = archivo.name[s_part_start_idx + 2 : s_part_start_idx + 13]
-                if len(file_ts_str) < 11:
-                    continue
-                archivo_min = horarios.minuto_de_archivo(file_ts_str[7:9], file_ts_str[9:11])
-            except (ValueError, IndexError, AttributeError):
+                archivo_min = horarios.minuto_de_archivo(m.group(3), m.group(4))
+            except ValueError:
                 continue
             if horarios.alguna_contiene(ventanas, archivo_min):
                 archivos_filtrados_dia.append(archivo)
@@ -104,7 +187,11 @@ class LustreRecoverFiles:
         archivos_encontrados_set = set()
         base_path = self.build_base_path(query_dict)
         for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
-            archivos_candidatos_dia = self.find_files_for_day(base_path, fecha_jjj)
+            archivos_candidatos_dia = None
+            if int(fecha_jjj[:4]) >= self.diario_desde_anio:
+                archivos_candidatos_dia = self.find_files_for_day_diario(query_dict, fecha_jjj)
+            if archivos_candidatos_dia is None:
+                archivos_candidatos_dia = self.find_files_for_day(base_path, fecha_jjj)
             if not archivos_candidatos_dia:
                 continue
             archivos_filtrados = self.filter_files_by_time(archivos_candidatos_dia, fecha_jjj, horarios_list)
@@ -112,31 +199,32 @@ class LustreRecoverFiles:
         return sorted(list(archivos_encontrados_set))
 
     def scan_existing_files(self, archivos_a_procesar: List[Path], destino: Path) -> List[Path]:
-        if not destino.exists() or not any(destino.iterdir()):
-            return archivos_a_procesar
-        timestamps_existentes = set()
-        for f in destino.iterdir():
-            if f.is_file():
-                s_part_start_idx = f.name.find('_s')
-                if s_part_start_idx != -1:
-                    timestamp_part = f.name[s_part_start_idx + 2 : s_part_start_idx + 13]
-                    timestamps_existentes.add(timestamp_part)
-        archivos_pendientes = []
-        for archivo_fuente in archivos_a_procesar:
-            s_part_start_idx = archivo_fuente.name.find('_s')
-            if s_part_start_idx != -1:
-                timestamp_fuente = archivo_fuente.name[s_part_start_idx + 2 : s_part_start_idx + 13]
-                if timestamp_fuente not in timestamps_existentes:
-                    archivos_pendientes.append(archivo_fuente)
-            else:
-                archivos_pendientes.append(archivo_fuente)
-        num_recuperados = len(archivos_a_procesar) - len(archivos_pendientes)
-        return archivos_pendientes
+        """Quita lo que ya está en destino, para no copiarlo de nuevo al retomar.
 
+        Sólo aplica a los `.nc` sueltos, y por nombre exacto: las 16 bandas de
+        un instante comparten timestamp, así que comparar por timestamp daría
+        por copiadas C02-C16 en cuanto existiera C01. Un `.tgz` siempre se
+        reprocesa —de él puede haberse extraído sólo una parte—, que es lo que
+        ya pasaba antes: la versión anterior buscaba `_s` y los nombres de los
+        .tgz llevan `-s`, así que nunca saltaba ninguno.
+        """
+        if not destino.exists():
+            return archivos_a_procesar
+        existentes = set()
+        for entrada in os.scandir(destino):
+            try:
+                if entrada.is_file(follow_symlinks=False) and entrada.stat().st_size > 0:
+                    existentes.add(entrada.name)
+            except OSError:
+                continue
+        return [
+            a for a in archivos_a_procesar
+            if not (a.suffix == '.nc' and a.name in existentes)
+        ]
 
 # --- Clase principal orquestadora ---
 class RecoverFiles:
-    def __init__(self, db: ConsultasDatabase, source_data_path: str, base_download_path: str, executor, s3_enabled: Optional[bool] = None, lustre_enabled: Optional[bool] = None, max_workers: Optional[int] = None, file_processing_timeout_seconds: Optional[int] = None):
+    def __init__(self, db: ConsultasDatabase, source_data_path: str, base_download_path: str, executor, s3_enabled: Optional[bool] = None, lustre_enabled: Optional[bool] = None, max_workers: Optional[int] = None, file_processing_timeout_seconds: Optional[int] = None, source_path_diario: Optional[str] = None):
         self.db = db
         self.source_data_path = Path(source_data_path)
         self.base_download_path = Path(base_download_path)
@@ -150,7 +238,7 @@ class RecoverFiles:
         self.S3_RETRY_ATTEMPTS = settings.S3_RETRY_ATTEMPTS
         self.S3_RETRY_BACKOFF_SECONDS = settings.S3_RETRY_BACKOFF_SECONDS
         self.GOES19_OPERATIONAL_DATE = datetime.fromisoformat(settings.goes19_operational_date).replace(tzinfo=timezone.utc)
-        self.lustre = LustreRecoverFiles(source_data_path, self.logger)
+        self.lustre = LustreRecoverFiles(source_data_path, self.logger, source_path_diario=source_path_diario)
 
         # Inicializa self.max_workers ANTES de usarla
         self.max_workers = max_workers or getattr(executor, "max_workers", settings.max_workers)
@@ -177,17 +265,29 @@ class RecoverFiles:
             # se sirve igual desde S3, que es lo correcto cuando la avería dura
             # semanas; lo que cambia es que ahora queda escrito en el reporte,
             # para que dentro de seis meses se sepa leer por qué `lustre` da 0.
+            # Con dos árboles (semanal y diario) se miran las raíces que esta
+            # consulta puede tocar: basta con que una esté para buscar, pero
+            # la que falte se avisa, porque sus días se irán a S3.
             if not self.lustre_enabled:
                 estado_lustre = "deshabilitado"
-            elif self.source_data_path.exists():
-                estado_lustre = "ok"
             else:
-                estado_lustre = "no_disponible"
-                self.logger.error(
-                    f"❌ Lustre no disponible: la raíz {self.source_data_path} no existe. "
-                    "Probablemente el volumen no está montado. La consulta se servirá "
-                    "íntegra desde S3, más lenta. Esto NO significa que falten datos."
-                )
+                raices = self.lustre.raices_para(query_dict)
+                ausentes = [r for r in raices if not r.exists()]
+                if len(ausentes) < len(raices):
+                    estado_lustre = "ok"
+                    for r in ausentes:
+                        self.logger.error(
+                            f"❌ Raíz de Lustre ausente: {r}. Los días que vivan en ese "
+                            "árbol se servirán desde S3."
+                        )
+                else:
+                    estado_lustre = "no_disponible"
+                    self.logger.error(
+                        f"❌ Lustre no disponible: no existe ninguna de sus raíces "
+                        f"({', '.join(str(r) for r in raices)}). Probablemente el volumen "
+                        "no está montado. La consulta se servirá íntegra desde S3, más "
+                        "lenta. Esto NO significa que falten datos."
+                    )
 
             # --- Optimización: Separar productos locales de los exclusivos de S3 ---
             productos_req_originales = query_dict.get('productos', []) or []
@@ -352,8 +452,11 @@ class RecoverFiles:
                 # 1. Extraer el timestamp YYYYJJJHHMM del nombre del archivo.
                 # archivo_fallido puede ser Path (Lustre) o str (S3 fallidos)
                 nombre_fallido = archivo_fallido.name if hasattr(archivo_fallido, 'name') else archivo_fallido
-                ts_str = nombre_fallido.split('-s')[1].split('.')[0][:11]
-                fecha_fallida_dt = datetime.strptime(ts_str, '%Y%j%H%M')
+                # `-s` en los .tgz, `_s` en los .nc (Lustre diario y S3).
+                m = _LUSTRE_TIMESTAMP_RE.search(nombre_fallido)
+                if not m:
+                    continue
+                fecha_fallida_dt = datetime.strptime(''.join(m.groups()), '%Y%j%H%M')
                 fecha_fallida_ymd = fecha_fallida_dt.strftime('%Y%m%d')
 
                 # 2. Encontrar la clave de fecha y el rango horario originales.
@@ -489,9 +592,15 @@ class RecoverFiles:
 
 def _process_safe_recover_file(archivo_fuente: Path, directorio_destino: Path, nivel: str, productos_solicitados_list: List[str], bandas_solicitadas_list: List[str]) -> List[Path]:
     """
-    Función segura para procesos que procesa un único archivo .tgz.
-    Verifica accesibilidad, y luego lo copia o extrae su contenido según la consulta.
+    Función segura para procesos que procesa un único archivo de Lustre.
+    Un `.nc` del árbol diario ya viene seleccionado por banda/producto y sólo
+    se copia; un `.tgz` del semanal se copia entero o se extrae en parte
+    según la consulta.
     """
+    if archivo_fuente.suffix == '.nc':
+        shutil.copy(archivo_fuente, directorio_destino)
+        return [directorio_destino / archivo_fuente.name]
+
     archivos_recuperados = []
     
     # Normalizar entradas para facilitar las comprobaciones

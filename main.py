@@ -64,18 +64,21 @@ async def lifespan(app: FastAPI):
                 "y sin lo que no esté en el bucket público. Si no es intencional, "
                 "revisa LUSTRE_ENABLED y que %s esté montado.", SOURCE_DATA_PATH,
             )
-        elif not os.path.exists(SOURCE_DATA_PATH):
-            log.error(
-                "❌ Lustre habilitado pero %s no existe: probablemente no está "
-                "montado. Las consultas caerán a S3 archivo por archivo.",
-                SOURCE_DATA_PATH,
-            )
+        else:
+            for raiz in (SOURCE_DATA_PATH, SOURCE_PATH_DIARIO):
+                if not os.path.exists(raiz):
+                    log.error(
+                        "❌ Lustre habilitado pero %s no existe: probablemente no está "
+                        "montado. Lo que viva ahí caerá a S3 archivo por archivo.",
+                        raiz,
+                    )
         if not S3_ENABLED:
             log.warning("⚠️  S3 DESHABILITADO: sólo se recuperará de Lustre.")
 
         recover = RecoverFiles(
             db=db,
             source_data_path=str(SOURCE_DATA_PATH),
+            source_path_diario=str(SOURCE_PATH_DIARIO),
             base_download_path=str(DOWNLOAD_PATH),
             executor=executor,
             s3_enabled=S3_ENABLED,
@@ -154,6 +157,7 @@ AVAILABLE_SATELLITE_CONFIGS = {
 # Usar variables de entorno para configurar rutas clave
 DB_PATH = settings.db_path
 SOURCE_DATA_PATH = settings.source_path
+SOURCE_PATH_DIARIO = settings.source_path_diario
 DOWNLOAD_PATH = settings.download_path
 
 # --- Límites de consulta y disco ---
@@ -224,9 +228,16 @@ async def health_check_detailed():
     #    su salud, y un 503 permanente ahoga a los que sí importan.
     if not lustre_status:
         storage_status = "no aplica: Lustre deshabilitado"
-    elif not os.path.exists(SOURCE_DATA_PATH):
-        storage_status = f"error: La ruta de origen '{SOURCE_DATA_PATH}' no existe o no es accesible."
-        overall_status = "error"
+    else:
+        # Dos árboles: semanal (acervo histórico) y diario (desde
+        # LAYOUT_DIARIO_DESDE_ANIO). Sin ninguno no hay Lustre; con uno solo
+        # se sigue sirviendo, y lo del otro cae a S3 — se dice, pero sin 503.
+        ausentes = [str(r) for r in (SOURCE_DATA_PATH, SOURCE_PATH_DIARIO) if not os.path.exists(r)]
+        if len(ausentes) == 2:
+            storage_status = f"error: Ninguna ruta de origen existe o es accesible: {', '.join(ausentes)}."
+            overall_status = "error"
+        elif ausentes:
+            storage_status = f"parcial: no existe '{ausentes[0]}'; lo que viva ahí se servirá desde S3."
 
     # Sin ningún origen no hay servicio que dar, aunque cada pieza esté sana.
     if not lustre_status and not s3_status:

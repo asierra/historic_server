@@ -50,7 +50,9 @@ La aplicación se configura mediante variables de entorno:
 | `S3_RETRY_BACKOFF_SECONDS`      | Factor de backoff para reintentos S3 (segundos)                          | `1.0`               |
 | `SIM_LOCAL_SUCCESS_RATE`        | Tasa de éxito local en modo simulador (0.0–1.0)                          | `0.8`               |
 | `SIM_S3_SUCCESS_RATE`           | Tasa de éxito S3 en modo simulador (0.0–1.0)                             | `0.5`               |
-| `SOURCE_PATH`                   | Ruta raíz del almacenamiento primario (Lustre)                          | `/depot/goes16`     |
+| `SOURCE_PATH`                   | Raíz del árbol semanal de Lustre: `{sensor}/{nivel}/{dominio}/AAAA/SS/*.tgz` (acervo histórico) | `/depot/goes16`     |
+| `SOURCE_PATH_DIARIO`            | Raíz del árbol diario de Lustre: `{nivel}/{sensor}/{dominio}/AAAA/JJJ/*.nc`, sueltos; en L2 una carpeta por producto (`ACHAC`, `CMIPC-C13`) | `/depot/goes-east`  |
+| `LAYOUT_DIARIO_DESDE_ANIO`      | Primer año que se busca en `SOURCE_PATH_DIARIO`. Un día que no esté ahí se busca en `SOURCE_PATH` (respaldo mientras dura la migración) | `2026`              |
 | `GOES19_OPERATIONAL_DATE`       | Fecha (YYYY-MM-DD UTC) desde la que el alias GOES-East corresponde a GOES-19 | `2025-04-07`        |
 
 ### Perfiles de entorno (.env)

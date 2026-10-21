@@ -1190,11 +1190,26 @@ def test_health_sigue_exigiendo_lustre_si_esta_habilitado(monkeypatch):
     """Con Lustre habilitado, que falte la ruta sí es un fallo real."""
     monkeypatch.setattr(main, "recover", _RecoverConOrigenes(lustre=True, s3=True))
     monkeypatch.setattr(main, "SOURCE_DATA_PATH", "/ruta/que/no/existe")
+    monkeypatch.setattr(main, "SOURCE_PATH_DIARIO", "/otra/ruta/que/no/existe")
 
     response = client.get("/health")
 
     assert response.status_code == 503
-    assert "no existe" in response.json()["storage"]
+    assert "Ninguna ruta de origen" in response.json()["storage"]
+
+
+def test_health_con_un_solo_arbol_de_lustre_avisa_sin_503(monkeypatch, tmp_path):
+    """Falta el árbol diario pero el semanal está: se sigue sirviendo, y se dice."""
+    monkeypatch.setattr(main, "recover", _RecoverConOrigenes(lustre=True, s3=True))
+    monkeypatch.setattr(main, "SOURCE_DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(main, "SOURCE_PATH_DIARIO", "/ruta/que/no/existe")
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    storage = response.json()["storage"]
+    assert storage.startswith("parcial")
+    assert "/ruta/que/no/existe" in storage
 
 
 def test_health_falla_si_no_queda_ningun_origen(monkeypatch):
