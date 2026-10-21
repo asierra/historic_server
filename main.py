@@ -1,8 +1,9 @@
 from fastapi import FastAPI, HTTPException, Body, Request
 from fastapi.responses import JSONResponse
+from fastapi.concurrency import run_in_threadpool
 from database import ConsultasDatabase, DATABASE_PATH
 from background_simulator import BackgroundSimulator
-from recover import RecoverFiles  # Importar el procesador real
+from recover import RecoverFiles, LustreRecoverFiles  # Importar el procesador real
 from s3_recover import _s3_circuit_breaker, ruta_registro_s3
 from processors import HistoricQueryProcessor
 from schemas import HistoricQueryRequest
@@ -158,6 +159,7 @@ AVAILABLE_SATELLITE_CONFIGS = {
 DB_PATH = settings.db_path
 SOURCE_DATA_PATH = settings.source_path
 SOURCE_PATH_DIARIO = settings.source_path_diario
+PROBE_MAX_DIAS = settings.probe_max_dias
 DOWNLOAD_PATH = settings.download_path
 
 # --- Límites de consulta y disco ---
@@ -288,11 +290,14 @@ async def health_check_detailed():
     })
 
 
-def _validate_and_prepare_request(request_data: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
+def _validate_and_prepare_request(request_data: Dict[str, Any], verificar_recursos: bool = True) -> Tuple[Dict[str, Any], Any]:
     """
     Función de ayuda reutilizable para validar y preparar una solicitud.
     Levanta HTTPException en caso de error.
     Devuelve (datos_validados, clase_de_configuracion).
+
+    Con verificar_recursos=False se omiten las cuotas (413) y el espacio en
+    disco (507): miden una descarga, y /probe no descarga nada.
     """
     # 1. Validar contra el contrato. historic_query_schema.json era hasta ahora un
     #    documento que nada aplicaba: lo unico que corria era el modelo Pydantic
@@ -369,6 +374,8 @@ def _validate_and_prepare_request(request_data: Dict[str, Any]) -> Tuple[Dict[st
 
     # --- Validaciones de límites y espacio en disco ---
     # Se realizan después de la validación de Pydantic y la preparación de datos.
+    if not verificar_recursos:
+        return data, config
 
     # 4. Estimar archivos y tamaño para las validaciones
     estimation_summary = config.estimate_files_summary(data)
@@ -480,6 +487,48 @@ async def validar_solicitud(request_data: Dict[str, Any] = Body(...)):
     except HTTPException as e:
         # Relanzar excepciones HTTP que ya vienen preparadas (ej. 422, 413, 507, etc.)
         raise e
+
+@app.post("/probe")
+async def sondear_lustre(request_data: Dict[str, Any] = Body(...)):
+    """
+    Qué hay en Lustre para una solicitud, sin copiar ni encolar nada.
+
+    Mismo cuerpo que /query. Responde, por día, en qué árbol está y cuántos
+    archivos hay. Lo que no esté en Lustre se pedirá a S3 al ejecutarla; S3 no
+    se consulta aquí porque listar el bucket es mucho más lento.
+    Abierto como /validate: no crea nada.
+    """
+    data, config = _validate_and_prepare_request(request_data, verificar_recursos=False)
+    query_dict = processor.procesar_request(data, config).to_dict()
+
+    dias = len(query_dict.get('fechas', {}))
+    if dias > PROBE_MAX_DIAS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"La solicitud abarca {dias} días y /probe recorre como máximo {PROBE_MAX_DIAS}. Divídala en tramos."
+        )
+
+    raices = {"semanal": str(SOURCE_DATA_PATH), "diario": str(SOURCE_PATH_DIARIO)}
+    if not settings.lustre_enabled:
+        estado = "deshabilitado"
+    elif not any(os.path.exists(r) for r in raices.values()):
+        estado = "no_disponible"
+    else:
+        estado = "ok"
+
+    cuerpo = {
+        "success": True,
+        "lustre": {"estado": estado, "raices": {k: {"ruta": v, "existe": os.path.exists(v)} for k, v in raices.items()}},
+        "archivos_estimados": config.estimate_files_summary(data)["file_count"],
+    }
+    if estado == "ok":
+        lustre = LustreRecoverFiles(str(SOURCE_DATA_PATH), logging.getLogger("probe"),
+                                    source_path_diario=str(SOURCE_PATH_DIARIO))
+        # Fuera del event loop: con un rango largo son cientos de listados de
+        # directorio, y bloquearían a /health y al polling mientras tanto.
+        cuerpo.update(await run_in_threadpool(lustre.sondear, query_dict))
+    return cuerpo
+
 
 @app.post("/query/{consulta_id}/restart")
 async def reiniciar_consulta(consulta_id: str, request: Request):

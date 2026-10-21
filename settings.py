@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     )
     layout_diario_desde_anio: int = Field(2026, description="First year searched in SOURCE_PATH_DIARIO before SOURCE_PATH.")
     download_path: Path = Field("/data/tmp", description="Directory for query downloads.")
+    probe_max_dias: int = Field(731, gt=0, description="Maximum number of days POST /probe will walk in Lustre. It downloads nothing, so download quotas don't apply; what it costs is one directory listing per day.")
     max_workers: int = Field(8, description="Number of parallel I/O workers.")
     s3_enabled: bool = Field(
         True,

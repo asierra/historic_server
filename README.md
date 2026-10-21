@@ -52,6 +52,7 @@ La aplicación se configura mediante variables de entorno:
 | `SIM_S3_SUCCESS_RATE`           | Tasa de éxito S3 en modo simulador (0.0–1.0)                             | `0.5`               |
 | `SOURCE_PATH`                   | Raíz del árbol semanal de Lustre: `{sensor}/{nivel}/{dominio}/AAAA/SS/*.tgz` (acervo histórico) | `/depot/goes16`     |
 | `SOURCE_PATH_DIARIO`            | Raíz del árbol diario de Lustre: `{nivel}/{sensor}/{dominio}/AAAA/JJJ/*.nc`, sueltos; en L2 una carpeta por producto (`ACHAC`, `CMIPC-C13`) | `/depot/goes-east`  |
+| `PROBE_MAX_DIAS`                | Máximo de días que recorre `POST /probe`                                 | `731`               |
 | `LAYOUT_DIARIO_DESDE_ANIO`      | Primer año que se busca en `SOURCE_PATH_DIARIO`. Un día que no esté ahí se busca en `SOURCE_PATH` (respaldo mientras dura la migración) | `2026`              |
 | `GOES19_OPERATIONAL_DATE`       | Fecha (YYYY-MM-DD UTC) desde la que el alias GOES-East corresponde a GOES-19 | `2025-04-07`        |
 
@@ -104,6 +105,7 @@ LUSTRE_ENABLED=1
 | 1 | `GET` | `/` | Ping básico |
 | 2 | `GET` | `/health` | Verificación de salud detallada |
 | 3 | `POST` | `/validate` | Validar solicitud sin ejecutar |
+| 3.1 | `POST` | `/probe` | Ver qué hay en Lustre para una solicitud, sin copiar nada |
 | 4 | `POST` | `/query` | Crear y encolar consulta |
 | 5 | `GET` | `/query/{consulta_id}` | Estado y progreso de una consulta |
 | 5.1 | `GET` | `/query/{consulta_id}?resultados=True` | Resultados completos al finalizar |
@@ -192,6 +194,43 @@ Códigos de error posibles:
 - `413` la consulta excede el límite de archivos o tamaño configurado
 - `422` estructura JSON inválida
 - `507` espacio en disco insuficiente
+
+---
+
+### 3.1. Sondear Lustre (`POST /probe`)
+
+Mismo cuerpo que `/query`. Recorre Lustre como lo haría la recuperación y dice, por día, en qué árbol está y cuántos archivos hay, **sin copiar, encolar ni crear registro**. Abierto como `/validate`.
+
+`/validate` sólo estima con tablas de periodicidad; `/probe` mira el disco. Lo que no esté en Lustre se pedirá a S3 al ejecutar la consulta. S3 no se consulta aquí: listar el bucket es mucho más lento.
+
+```json
+{
+  "success": true,
+  "lustre": {
+    "estado": "ok",
+    "raices": {
+      "semanal": { "ruta": "/depot/goes16",    "existe": true },
+      "diario":  { "ruta": "/depot/goes-east", "existe": true }
+    }
+  },
+  "archivos_estimados": 6,
+  "nc": 2,
+  "tgz": 1,
+  "dias": 3,
+  "dias_sin_datos": ["20260719"],
+  "por_dia": {
+    "20260219": { "arbol": "semanal", "nc": 0, "tgz": 1 },
+    "20260719": { "arbol": "diario",  "nc": 0, "tgz": 0 },
+    "20261018": { "arbol": "diario",  "nc": 2, "tgz": 0 }
+  }
+}
+```
+
+- `arbol: "diario"` con 0 archivos es un hueco del acervo: la carpeta del día existe pero está vacía o no trae lo pedido. `null` es que el día no está en ningún árbol.
+- **En el árbol semanal se cuentan `.tgz`, no archivos:** saber qué bandas o productos trae cada uno exige abrirlo. Por eso `nc` y `tgz` van aparte y sólo `nc` es comparable con `archivos_estimados`.
+- Con `estado` distinto de `ok` (`no_disponible`, `deshabilitado`) no se recorre nada y faltan `nc`, `tgz` y `por_dia`.
+
+No aplica las cuotas de descarga (`MAX_FILES_PER_QUERY`, `MAX_SIZE_MB_PER_QUERY`) ni el espacio en disco, que miden una descarga. Su propio límite es `PROBE_MAX_DIAS` (731 por omisión): lo que cuesta es un listado de directorio por día. Pasarse da `413`.
 
 ---
 

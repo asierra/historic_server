@@ -66,6 +66,14 @@ def clave_de_archivo(nombre: str) -> Optional[str]:
     return resto.split('_e', 1)[0]
 
 
+def consulta_para_lustre(query_dict: Dict) -> Dict:
+    """La consulta sin los productos que sólo existen en S3."""
+    s3_only = set(_SAT_CONFIG.S3_ONLY_PRODUCTS)
+    q = dict(query_dict)
+    q['productos'] = [p for p in (query_dict.get('productos') or []) if str(p).upper() not in s3_only]
+    return q
+
+
 # --- Clase para recuperación local (Lustre) ---
 class LustreRecoverFiles:
     """Busca archivos en los dos árboles de Lustre.
@@ -198,20 +206,63 @@ class LustreRecoverFiles:
                 archivos_filtrados_dia.append(archivo)
         return archivos_filtrados_dia
 
+    def buscar_dia(self, query_dict: Dict, fecha_jjj: str, horarios_list: List[str], base_path: Optional[Path] = None):
+        """Busca un día y dice en qué árbol: ("diario" | "semanal" | None, archivos).
+
+        "diario" en cuanto existe la carpeta del día, aunque no traiga nada de
+        lo pedido o esté vacía (los huecos del satélite y del peta se ven así):
+        en ese caso no se cae al semanal, que para ese día ya no es la fuente.
+        """
+        arbol, candidatos = None, None
+        if int(fecha_jjj[:4]) >= self.diario_desde_anio:
+            candidatos = self.find_files_for_day_diario(query_dict, fecha_jjj)
+            if candidatos is not None:
+                arbol = "diario"
+        if candidatos is None:
+            candidatos = self.find_files_for_day(base_path or self.build_base_path(query_dict), fecha_jjj)
+        if not candidatos:
+            return arbol, []
+        archivos = self.filter_files_by_time(candidatos, fecha_jjj, horarios_list)
+        if arbol is None and archivos:
+            arbol = "semanal"
+        return arbol, archivos
+
     def discover_and_filter_files(self, query_dict: Dict) -> List[Path]:
         archivos_encontrados_set = set()
         base_path = self.build_base_path(query_dict)
         for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
-            archivos_candidatos_dia = None
-            if int(fecha_jjj[:4]) >= self.diario_desde_anio:
-                archivos_candidatos_dia = self.find_files_for_day_diario(query_dict, fecha_jjj)
-            if archivos_candidatos_dia is None:
-                archivos_candidatos_dia = self.find_files_for_day(base_path, fecha_jjj)
-            if not archivos_candidatos_dia:
-                continue
-            archivos_filtrados = self.filter_files_by_time(archivos_candidatos_dia, fecha_jjj, horarios_list)
-            archivos_encontrados_set.update(archivos_filtrados)
+            _, archivos = self.buscar_dia(query_dict, fecha_jjj, horarios_list, base_path)
+            archivos_encontrados_set.update(archivos)
         return sorted(list(archivos_encontrados_set))
+
+    def sondear(self, query_dict: Dict) -> Dict:
+        """Qué hay en Lustre para una consulta, sin copiar nada (POST /probe).
+
+        En el árbol semanal sólo se ven los .tgz y su horario: qué bandas o
+        productos traen dentro exigiría abrirlos, y eso con rangos grandes
+        cuesta lo que una recuperación. Por eso se cuentan aparte.
+        """
+        query_dict = consulta_para_lustre(query_dict)
+        base_path = self.build_base_path(query_dict)
+        por_dia, sin_datos = {}, []
+        total_nc = total_tgz = 0
+        for fecha_jjj in sorted(query_dict.get('fechas', {})):
+            arbol, archivos = self.buscar_dia(query_dict, fecha_jjj, query_dict['fechas'][fecha_jjj], base_path)
+            fecha = datetime.strptime(fecha_jjj, '%Y%j').strftime('%Y%m%d')
+            nc = sum(1 for a in archivos if a.suffix == '.nc')
+            tgz = len(archivos) - nc
+            total_nc += nc
+            total_tgz += tgz
+            por_dia[fecha] = {"arbol": arbol, "nc": nc, "tgz": tgz}
+            if not archivos:
+                sin_datos.append(fecha)
+        return {
+            "nc": total_nc,
+            "tgz": total_tgz,
+            "dias": len(por_dia),
+            "dias_sin_datos": sin_datos,
+            "por_dia": por_dia,
+        }
 
     def scan_existing_files(self, archivos_a_procesar: List[Path], destino: Path) -> List[Path]:
         """Quita lo que ya está en destino, para no copiarlo de nuevo al retomar.
@@ -311,12 +362,7 @@ class RecoverFiles:
                     )
 
             # --- Optimización: Separar productos locales de los exclusivos de S3 ---
-            productos_req_originales = query_dict.get('productos', []) or []
-            s3_only_products = set(_SAT_CONFIG.S3_ONLY_PRODUCTS)
-            
-            productos_para_lustre = [p for p in productos_req_originales if p.upper() not in s3_only_products]
-            query_para_lustre = query_dict.copy()
-            query_para_lustre['productos'] = productos_para_lustre
+            query_para_lustre = consulta_para_lustre(query_dict)
             # --------------------------------------------------------------------
 
             if estado_lustre == "ok":
