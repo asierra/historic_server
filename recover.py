@@ -11,7 +11,7 @@ from concurrent.futures import TimeoutError, as_completed
 from database import ConsultasDatabase
 from collections import defaultdict
 import time
-from s3_recover import S3RecoverFiles
+from s3_recover import S3RecoverFiles, ruta_registro_s3, leer_registro_s3
 from config import SatelliteConfigGOES
 import horarios
 from settings import settings
@@ -267,6 +267,8 @@ class RecoverFiles:
             # 1. Preparar entorno
             directorio_destino = self.base_download_path / consulta_id
             directorio_destino.mkdir(exist_ok=True, parents=True)
+            _barrer_temporales(directorio_destino)
+            registro_s3 = ruta_registro_s3(self.base_download_path, consulta_id)
             self.db.actualizar_estado(consulta_id, "procesando", 10, "Preparando entorno")
 
             objetivos_fallidos_local = []
@@ -434,7 +436,7 @@ class RecoverFiles:
                     pass
 
                 s3_recuperados, objetivos_fallidos_s3 = self.s3.download_files(
-                    consulta_id, objetivos_finales_s3, directorio_destino, self.db
+                    consulta_id, objetivos_finales_s3, directorio_destino, self.db, registro=registro_s3
                 )
                 # Excluir de las fallas locales los archivos que S3 sí recuperó,
                 # para no contarlos como fallidos en el mensaje final.
@@ -453,15 +455,22 @@ class RecoverFiles:
             # 6. Generar reporte final
             # Usar scandir para obtener nombre + tamaño en una sola pasada del OS,
             # evitando stat() individual por cada archivo (crítico con cientos de miles).
-            dest_entries = [e for e in os.scandir(directorio_destino) if e.is_file(follow_symlinks=False)]
+            dest_entries = [
+                e for e in os.scandir(directorio_destino)
+                if e.is_file(follow_symlinks=False) and not e.name.startswith(".")
+            ]
             self.db.actualizar_estado(consulta_id, "procesando", 95, "Generando reporte final")
             
             # Obtener la consulta para acceder al timestamp de creación
             consulta_db = self.db.obtener_consulta(consulta_id)
             timestamp_creacion = consulta_db.get("timestamp_creacion") if consulta_db else datetime.now().isoformat()
 
+            # El origen de cada archivo sale del registro, no de lo que S3
+            # devolvió en esta corrida: así un reinicio con S3 apagado no le
+            # pasa a Lustre lo que S3 bajó antes.
+            nombres_s3 = leer_registro_s3(registro_s3)
             resultados_finales = self._generar_reporte_final(
-                consulta_id, dest_entries, s3_recuperados, directorio_destino, objetivos_fallidos_final, query_dict, timestamp_creacion, estado_lustre
+                consulta_id, dest_entries, [Path(n) for n in nombres_s3], directorio_destino, objetivos_fallidos_final, query_dict, timestamp_creacion, estado_lustre
             )
             # Mensaje final breve y legible
             total_recuperados = resultados_finales.get("total_archivos", 0)
@@ -559,8 +568,10 @@ class RecoverFiles:
                 return 'UNKNOWN'
 
         # Conjunto de nombres S3 para clasificación rápida O(1)
-        s3_names_set = {p.name for p in s3_recuperados}
-        s3_names_full = [p.name for p in s3_recuperados]
+        # Sólo lo que S3 bajó y sigue en destino: el registro puede nombrar
+        # algo que después se borró.
+        s3_names_set = {p.name for p in s3_recuperados} & {e.name for e in dest_entries}
+        s3_names_full = sorted(s3_names_set)
 
         # Recorrido único: tamaño total + conteos por producto en una sola pasada
         # DirEntry.stat() usa el resultado cacheado del scandir — sin syscalls extra
@@ -626,6 +637,41 @@ class RecoverFiles:
 # ProcessPoolExecutor requiere que las funciones que se ejecutan en otros procesos
 # estén definidas a nivel superior del módulo, no como métodos de una clase.
 
+# Prefijos de lo que se escribe a medias en destino. Empiezan con punto para
+# que nada los confunda con un resultado, y se barren al empezar cada corrida.
+_PREFIJOS_TEMPORALES = (".extr_",)
+_SUFIJO_PARCIAL = ".part"
+
+
+def _copiar_atomico(origen: Path, directorio_destino: Path) -> Path:
+    """Copia a un temporal y renombra.
+
+    Una copia cortada (timeout del pool, reinicio) dejaba un archivo truncado
+    con el nombre final. La corrida siguiente lo daba por bueno —tanto
+    scan_existing_files como S3 miran sólo que exista y no esté vacío— y el
+    usuario recibía un .nc roto.
+    """
+    final = directorio_destino / origen.name
+    parcial = directorio_destino / f".{origen.name}{_SUFIJO_PARCIAL}"
+    shutil.copy(origen, parcial)
+    os.replace(parcial, final)
+    return final
+
+
+def _barrer_temporales(directorio_destino: Path) -> None:
+    """Quita lo que dejó a medias una corrida interrumpida."""
+    for entrada in os.scandir(directorio_destino):
+        nombre = entrada.name
+        if not nombre.startswith("."):
+            continue
+        if nombre.endswith(_SUFIJO_PARCIAL) or nombre.startswith(_PREFIJOS_TEMPORALES):
+            ruta = Path(entrada.path)
+            if entrada.is_dir(follow_symlinks=False):
+                shutil.rmtree(ruta, ignore_errors=True)
+            else:
+                ruta.unlink(missing_ok=True)
+
+
 def _process_safe_recover_file(archivo_fuente: Path, directorio_destino: Path, nivel: str, productos_solicitados_list: List[str], bandas_solicitadas_list: List[str]) -> List[Path]:
     """
     Función segura para procesos que procesa un único archivo de Lustre.
@@ -634,8 +680,7 @@ def _process_safe_recover_file(archivo_fuente: Path, directorio_destino: Path, n
     según la consulta.
     """
     if archivo_fuente.suffix == '.nc':
-        shutil.copy(archivo_fuente, directorio_destino)
-        return [directorio_destino / archivo_fuente.name]
+        return [_copiar_atomico(archivo_fuente, directorio_destino)]
 
     archivos_recuperados = []
     
@@ -672,8 +717,7 @@ def _process_safe_recover_file(archivo_fuente: Path, directorio_destino: Path, n
     )
 
     if copiar_tgz_completo:
-        shutil.copy(archivo_fuente, directorio_destino)
-        archivos_recuperados.append(directorio_destino / archivo_fuente.name)
+        archivos_recuperados.append(_copiar_atomico(archivo_fuente, directorio_destino))
         return archivos_recuperados
 
     # --- Lógica de extracción selectiva ---
@@ -707,9 +751,20 @@ def _process_safe_recover_file(archivo_fuente: Path, directorio_destino: Path, n
                         miembros_a_extraer.append(miembro)
             
             if miembros_a_extraer:
-                tar.extractall(path=directorio_destino, members=miembros_a_extraer)
-                for miembro in miembros_a_extraer:
-                    archivos_recuperados.append(directorio_destino / miembro.name)
+                # A un directorio temporal y luego rename por miembro, por lo
+                # mismo que en _copiar_atomico: si el pool mata el proceso por
+                # timeout a media extracción, no queda nada truncado con el
+                # nombre final.
+                temporal = directorio_destino / f".extr_{archivo_fuente.name}"
+                shutil.rmtree(temporal, ignore_errors=True)
+                try:
+                    tar.extractall(path=temporal, members=miembros_a_extraer)
+                    for miembro in miembros_a_extraer:
+                        final = directorio_destino / miembro.name
+                        os.replace(temporal / miembro.name, final)
+                        archivos_recuperados.append(final)
+                finally:
+                    shutil.rmtree(temporal, ignore_errors=True)
             
             if not miembros_a_extraer:
                 raise FileNotFoundError(f"No se encontraron archivos internos que coincidieran con la solicitud en {archivo_fuente.name}")

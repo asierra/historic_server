@@ -1,3 +1,4 @@
+import os
 import s3fs
 import random
 import time
@@ -79,6 +80,27 @@ _s3_circuit_breaker = S3CircuitBreaker(
     recovery_timeout=60,
 )
 
+
+
+def ruta_registro_s3(base_download_path, consulta_id: str) -> Path:
+    """Dónde se apunta qué archivos de una consulta bajó S3 de verdad.
+
+    Va fuera de `DOWNLOAD_PATH/{id}` a propósito: tempoftp sincroniza ese
+    directorio con `rsync -av`, así que cualquier cosa que se deje dentro le
+    llega al usuario. Sobrevive a reinicios, que es lo que hace falta para
+    distinguir, al retomar, lo que bajó S3 de lo que copió Lustre: los dos
+    dejan el mismo nombre en L1b.
+    """
+    return Path(base_download_path) / ".origen" / f"{consulta_id}.s3"
+
+
+def leer_registro_s3(ruta: Optional[Path]) -> set:
+    if ruta is None:
+        return set()
+    try:
+        return {l.strip() for l in ruta.read_text().splitlines() if l.strip()}
+    except FileNotFoundError:
+        return set()
 
 
 class S3RecoverFiles:
@@ -203,10 +225,22 @@ class S3RecoverFiles:
         return {Path(f).name: f for f in objetivos_s3_a_descargar}
 
 
-    def download_files(self, consulta_id: str, archivos_s3: List[str], directorio_destino: Path, db) -> (List[Path], List[str]):
+    def download_files(self, consulta_id: str, archivos_s3: List[str], directorio_destino: Path, db, registro: Optional[Path] = None) -> (List[Path], List[str]):
+        """Baja de S3 lo que falte y devuelve (bajados por S3, fallidos).
+
+        "Bajados por S3" son sólo los que S3 bajó de verdad, en esta corrida o
+        en una previa según `registro`. Un archivo que ya está en destino sin
+        figurar en el registro lo puso Lustre: no se vuelve a bajar, pero
+        tampoco se cuenta como de S3. Contarlo era lo que inflaba la parte de
+        S3 en las estadísticas.
+        """
         s3 = s3fs.S3FileSystem(anon=True, config_kwargs={'connect_timeout': settings.S3_CONNECT_TIMEOUT, 'read_timeout': settings.S3_READ_TIMEOUT})
         objetivos_aun_fallidos = []
         s3_recuperados_set = set()
+        bajados_antes = leer_registro_s3(registro)
+        registro_lock = threading.Lock()
+        if registro is not None:
+            registro.parent.mkdir(parents=True, exist_ok=True)
 
         # Normalizar objetivos únicos
         objetivos_unicos = list(set(archivos_s3))
@@ -222,7 +256,8 @@ class S3RecoverFiles:
             try:
                 if ruta_local.exists() and ruta_local.stat().st_size > 0:
                     existentes.append(s3_path)
-                    s3_recuperados_set.add(ruta_local)
+                    if nombre_local in bajados_antes:
+                        s3_recuperados_set.add(ruta_local)
                 else:
                     pendientes.append(s3_path)
             except OSError:
@@ -251,14 +286,17 @@ class S3RecoverFiles:
 
         # Si no hay pendientes, retornar de inmediato
         if not pendientes:
-            self.logger.info(f"S3: no hay descargas pendientes; {completados}/{total_obj} ya presentes (consulta_id={consulta_id})")
+            self.logger.info(
+                f"S3: no hay descargas pendientes; {completados}/{total_obj} ya presentes, "
+                f"{len(s3_recuperados_set)} de ellos bajados por S3 en una corrida previa (consulta_id={consulta_id})"
+            )
             return list(s3_recuperados_set), objetivos_aun_fallidos
 
         # Timeout por tarea = S3_READ_TIMEOUT × reintentos + holgura de backoff
         task_timeout = self.retry_attempts * (settings.S3_READ_TIMEOUT + self.retry_backoff * (2 ** self.retry_attempts)) + 10
         with ThreadPool(max_workers=self.max_workers) as pool:
             future_to_s3_path = {
-                pool.schedule(self._download_single_s3_objective, args=(consulta_id, s3_path, directorio_destino, s3, db)): s3_path
+                pool.schedule(self._download_single_s3_objective, args=(consulta_id, s3_path, directorio_destino, s3, db, registro, registro_lock)): s3_path
                 for s3_path in pendientes
             }
             for future in as_completed(list(future_to_s3_path.keys())):
@@ -301,7 +339,7 @@ class S3RecoverFiles:
         )
         return list(s3_recuperados_set), objetivos_aun_fallidos
 
-    def _download_single_s3_objective(self, consulta_id: str, archivo_remoto_s3: str, directorio_destino: Path, s3_client: s3fs.S3FileSystem, db) -> Optional[Path]:
+    def _download_single_s3_objective(self, consulta_id: str, archivo_remoto_s3: str, directorio_destino: Path, s3_client: s3fs.S3FileSystem, db, registro: Optional[Path] = None, registro_lock: Optional[threading.Lock] = None) -> Optional[Path]:
         last_exception = None
         for attempt in range(self.retry_attempts):
             # Fail-fast si el circuito está abierto — no bloqueamos el worker esperando timeouts
@@ -316,15 +354,24 @@ class S3RecoverFiles:
             try:
                 nombre_archivo_local = Path(archivo_remoto_s3).name
                 ruta_local_destino = directorio_destino / nombre_archivo_local
-                # Idempotencia: si el archivo ya existe, omitir descarga
+                # Idempotencia: si apareció entre el conteo y ahora, no se baja,
+                # y como no lo bajó S3 tampoco se le cuenta (None).
                 try:
                     if ruta_local_destino.exists() and ruta_local_destino.stat().st_size > 0:
-                        return ruta_local_destino
+                        return None
                 except OSError:
                     pass
-                # Reducir ruido: no actualizar DB por cada intento/archivo; el progreso se reporta en bloque.
-                s3_client.get(archivo_remoto_s3, str(ruta_local_destino))
+                # A un temporal y luego rename: una descarga cortada no debe
+                # dejar un archivo truncado con el nombre final, que la
+                # siguiente corrida daría por bueno.
+                parcial = ruta_local_destino.with_name(f".{nombre_archivo_local}.part")
+                s3_client.get(archivo_remoto_s3, str(parcial))
+                os.replace(parcial, ruta_local_destino)
                 _s3_circuit_breaker.record_success()
+                if registro is not None:
+                    with (registro_lock or threading.Lock()):
+                        with open(registro, "a") as f:
+                            f.write(nombre_archivo_local + "\n")
                 return ruta_local_destino
             except Exception as e:
                 _s3_circuit_breaker.record_failure()

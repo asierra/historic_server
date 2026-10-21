@@ -244,72 +244,154 @@ def test_la_clave_ignora_el_prefijo_de_origen_y_los_tiempos_de_fin_y_creacion():
     assert clave_de_archivo("ABI-L1b-RadC-M6_G19-s20260501201.tgz") is None
 
 
-class _S3Falso:
-    """Ofrece unos objetos y registra cuáles se le piden de verdad."""
+class _NubeFalsa:
+    """Sustituye a s3fs.S3FileSystem: lo único simulado es la red.
 
-    def __init__(self, objetos):
-        self.objetos = objetos
+    Así las pruebas pasan por el download_files real, que es donde se decide
+    qué cuenta como bajado de S3. `cortar` hace que la descarga de ese nombre
+    escriba la mitad y falle, como una conexión que se cae.
+    """
+
+    def __init__(self, objetos, cortar=()):
+        self.objetos = list(objetos)
+        self.cortar = set(cortar)
         self.pedidos = []
 
-    def discover_files(self, query_dict, fecha_g19):
-        return {o: o for o in self.objetos}
+    def __call__(self, *a, **k):  # se usa en lugar de la clase
+        return self
 
-    def download_files(self, consulta_id, archivos, destino, db):
-        recuperados = []
-        for o in archivos:
-            self.pedidos.append(o)
-            ruta = destino / o.rsplit("/", 1)[-1]
-            if not ruta.exists():
-                ruta.write_bytes(b"s3")
-            recuperados.append(ruta)
-        return recuperados, []
+    def get(self, remoto, local):
+        nombre = remoto.rsplit("/", 1)[-1]
+        self.pedidos.append(nombre)
+        with open(local, "wb") as f:
+            f.write(b"s3-a-medias" if nombre in self.cortar else b"s3")
+        if nombre in self.cortar:
+            raise ConnectionError("se cayó la conexión")
 
 
-def _correr(arboles, tmp_path, cid, q, s3):
+@pytest.fixture
+def nube(monkeypatch):
+    import s3_recover
+
+    def _crear(objetos, cortar=()):
+        n = _NubeFalsa(objetos, cortar)
+        monkeypatch.setattr(s3_recover.s3fs, "S3FileSystem", n)
+        monkeypatch.setattr(s3_recover.S3RecoverFiles, "discover_files",
+                            lambda self, q, f: {o: o for o in n.objetos})
+        monkeypatch.setattr(s3_recover.settings, "S3_RETRY_ATTEMPTS", 1)
+        return n
+    return _crear
+
+
+def _correr(arboles, tmp_path, cid, q, s3=True, lustre=True, crear=True):
     semanal, diario = arboles
     db = ConsultasDatabase(str(tmp_path / "c.db"))
-    assert db.crear_consulta(cid, q)
-    rf = RecoverFiles(
+    if crear:
+        assert db.crear_consulta(cid, q)
+    RecoverFiles(
         db=db, source_data_path=str(semanal), source_path_diario=str(diario),
         base_download_path=str(tmp_path / "descargas"), executor=_PoolEnLinea(),
-        s3_enabled=True, lustre_enabled=True, max_workers=1,
-    )
-    rf.s3 = s3
-    rf.procesar_consulta(cid, q)
+        s3_enabled=s3, lustre_enabled=lustre, max_workers=1,
+    ).procesar_consulta(cid, q)
     return db.obtener_consulta(cid)["resultados"]
 
 
-def test_l2_s3_no_baja_el_or_de_lo_que_lustre_trajo_como_cg(arboles, tmp_path):
+def _remoto(nombre):
+    return f"noaa-goes19/X/{nombre}"
+
+
+CTP_CG = "CG_ABI-L2-CTPC-M6_G19_s20262901201174_e20262901203559_c20262900606140.nc"
+CTP_OR = "OR_ABI-L2-CTPC-M6_G19_s20262901201174_e20262901203548_c20262901205232.nc"
+CTP_OR_OTRO = "OR_ABI-L2-CTPC-M6_G19_s20262901206174_e20262901208548_c20262901210202.nc"
+Q_CTP = {"sensor": "abi", "nivel": "L2", "dominio": "conus", "productos": ["CTP"], "bandas": [],
+         "fechas": {"2026290": ["12:00-12:10"]}, "_original_request": {"productos": ["CTP"], "bandas": []}}
+L1B_10 = _nc_l1b("C", "10", "2026291", "0000")
+Q_L1B_10 = dict(QUERY_L1B, bandas=["10"], fechas={"2026291": ["00:00-00:10"]},
+                _original_request={"bandas": ["10"], "productos": []})
+
+
+def test_l2_s3_no_baja_el_or_de_lo_que_lustre_trajo_como_cg(arboles, tmp_path, nube):
     _, diario = arboles
     d = diario / "l2" / "abi" / "conus" / "2026" / "290" / "CTPC"
     d.mkdir(parents=True)
-    (d / "CG_ABI-L2-CTPC-M6_G19_s20262901201174_e20262901203559_c20262900606140.nc").write_bytes(b"x")
-    s3 = _S3Falso([
-        "noaa-goes19/ABI-L2-CTPC/2026/290/12/OR_ABI-L2-CTPC-M6_G19_s20262901201174_e20262901203548_c20262901205232.nc",
-        # Uno que Lustre no tiene: ése sí debe bajarse.
-        "noaa-goes19/ABI-L2-CTPC/2026/290/12/OR_ABI-L2-CTPC-M6_G19_s20262901206174_e20262901208548_c20262901210202.nc",
-    ])
-    q = {"sensor": "abi", "nivel": "L2", "dominio": "conus", "productos": ["CTP"], "bandas": [],
-         "fechas": {"2026290": ["12:00-12:10"]}, "_original_request": {"productos": ["CTP"], "bandas": []}}
+    (d / CTP_CG).write_bytes(b"x")
+    n = nube([_remoto(CTP_OR), _remoto(CTP_OR_OTRO)])  # el segundo Lustre no lo tiene
 
-    r = _correr(arboles, tmp_path, "L2DUPLI1", q, s3)
+    r = _correr(arboles, tmp_path, "L2DUPLI1", Q_CTP)
 
-    assert [p.rsplit("/", 1)[-1][:40] for p in s3.pedidos] == ["OR_ABI-L2-CTPC-M6_G19_s20262901206174_e2"]
+    assert n.pedidos == [CTP_OR_OTRO]
     assert r["fuentes"]["lustre"]["total"] == 1
-    assert r["fuentes"]["s3"]["total"] == 1
+    assert r["fuentes"]["s3"]["archivos"] == [CTP_OR_OTRO]
     assert r["total_archivos"] == 2
 
 
-def test_l1b_lo_que_copio_lustre_no_se_le_adjudica_a_s3(arboles, tmp_path):
+def test_l1b_lo_que_copio_lustre_no_se_le_adjudica_a_s3(arboles, tmp_path, nube):
     _, diario = arboles
     _dia_l1b(diario, "2026291", bandas=("10",), horas=("0000",))
-    nombre = _nc_l1b("C", "10", "2026291", "0000")
-    s3 = _S3Falso([f"noaa-goes19/ABI-L1b-RadC/2026/291/00/{nombre}"])
-    q = dict(QUERY_L1B, bandas=["10"], fechas={"2026291": ["00:00-00:10"]},
-             _original_request={"bandas": ["10"], "productos": []})
+    n = nube([_remoto(L1B_10)])
 
-    r = _correr(arboles, tmp_path, "L1BCRED1", q, s3)
+    r = _correr(arboles, tmp_path, "L1BCRED1", Q_L1B_10)
 
-    assert s3.pedidos == []
-    assert r["fuentes"]["lustre"]["total"] == 1
+    assert n.pedidos == []
+    assert r["fuentes"]["lustre"]["archivos"] == [L1B_10]
     assert r["fuentes"]["s3"]["total"] == 0
+
+
+def test_lo_que_dejo_lustre_antes_no_lo_reclama_s3_si_hoy_lustre_esta_caido(arboles, tmp_path, nube):
+    """Corrida 1 con Lustre; corrida 2 con /depot desmontado. Mismo nombre en
+    L1b: S3 lo ve presente y no lo baja, y no debe contarlo como suyo."""
+    _, diario = arboles
+    _dia_l1b(diario, "2026291", bandas=("10",), horas=("0000",))
+    n = nube([_remoto(L1B_10)])
+    _correr(arboles, tmp_path, "REINIC01", Q_L1B_10)
+
+    r = _correr(arboles, tmp_path, "REINIC01", Q_L1B_10, lustre=False, crear=False)
+
+    assert n.pedidos == []
+    assert r["fuentes"]["s3"]["total"] == 0
+    assert r["fuentes"]["lustre"]["total"] == 1
+
+
+def test_lo_que_bajo_s3_antes_sigue_contando_como_s3_al_retomar(arboles, tmp_path, nube):
+    """Corrida 1: Lustre no lo tiene y S3 lo baja. Corrida 2, con S3 apagado:
+    el archivo sigue siendo de S3, no pasa a Lustre por descarte."""
+    n = nube([_remoto(L1B_10)])
+    _correr(arboles, tmp_path, "REINIC02", Q_L1B_10)
+    assert n.pedidos == [L1B_10]
+
+    r = _correr(arboles, tmp_path, "REINIC02", Q_L1B_10, s3=False, crear=False)
+
+    assert r["fuentes"]["s3"]["archivos"] == [L1B_10]
+    assert r["fuentes"]["lustre"]["total"] == 0
+
+
+def test_una_descarga_cortada_no_deja_un_archivo_que_luego_pase_por_bueno(arboles, tmp_path, nube):
+    n = nube([_remoto(L1B_10)], cortar={L1B_10})
+    r = _correr(arboles, tmp_path, "CORTADA1", Q_L1B_10)
+
+    destino = tmp_path / "descargas" / "CORTADA1"
+    assert not (destino / L1B_10).exists()
+    assert r["fuentes"]["s3"]["total"] == 0
+    assert r["total_archivos"] == 0
+
+    # Al reintentar, se vuelve a pedir: nada lo dio por presente.
+    n.cortar.clear()
+    r = _correr(arboles, tmp_path, "CORTADA1", Q_L1B_10, crear=False)
+    assert n.pedidos == [L1B_10, L1B_10]
+    assert r["fuentes"]["s3"]["archivos"] == [L1B_10]
+    assert sorted(p.name for p in destino.iterdir()) == [L1B_10]
+
+
+def test_los_temporales_de_una_corrida_interrumpida_se_barren(arboles, tmp_path):
+    """Lo que deja un proceso muerto a media copia: ni se entrega ni se cuenta."""
+    _, diario = arboles
+    _dia_l1b(diario, "2026291", bandas=("10",), horas=("0000",))
+    destino = tmp_path / "descargas" / "BARRIDO1"
+    destino.mkdir(parents=True)
+    (destino / f".{L1B_10}.part").write_bytes(b"mitad")
+    (destino / ".extr_ABI-L1b-RadC-M6_G19-s20260501201.tgz").mkdir()
+
+    r = _correr(arboles, tmp_path, "BARRIDO1", Q_L1B_10, s3=False)
+
+    assert sorted(p.name for p in destino.iterdir()) == [L1B_10]
+    assert r["total_archivos"] == 1

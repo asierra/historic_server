@@ -324,8 +324,12 @@ Nota: el campo `consulta_recuperacion` contiene la consulta original filtrada a 
 | Valor | Significa |
 |---|---|
 | `ok` | Lustre estaba disponible. Un total de 0 quiere decir que el archivo no tenía esas fechas. |
-| `no_disponible` | La raíz `SOURCE_PATH` no existe: el volumen no está montado. **No faltan datos**, sólo se sirvió todo desde S3 y más lento. |
+| `no_disponible` | No existe ninguna de las raíces de Lustre (`SOURCE_PATH`, `SOURCE_PATH_DIARIO`): el volumen no está montado. **No faltan datos**, sólo se sirvió todo desde S3 y más lento. |
 | `deshabilitado` | `LUSTRE_ENABLED=False`. Decisión de configuración, no avería. |
+
+`fuentes.s3` cuenta **sólo lo que S3 bajó de la nube** para esa consulta, en esa corrida o en una previa; `fuentes.lustre` es todo lo demás que hay en destino. El origen se apunta al bajar cada archivo en `DOWNLOAD_PATH/.origen/{id}.s3`, fuera del directorio de la consulta porque tempoftp lo sincroniza entero con el usuario; `DELETE ?purge=true` lo borra también. S3 no pide lo que Lustre ya entregó, aunque se llame distinto (`CG_` en Lustre, `OR_` en S3): compara producto, banda e instante.
+
+⚠️ **Los reportes anteriores al 21-oct-2026 sobreestiman a S3** en L1b: Lustre y S3 dan el mismo nombre, S3 encontraba presente lo que había copiado Lustre y se lo contaba. En L2 S3 bajaba además un duplicado `OR_` de cada `CG_` de Lustre. Los reportes anteriores no son fiables para repartir entre fuentes.
 
 La distinción importa al leer un resultado meses después: `/depot` se ha desmontado durante semanas por cortes de corriente y discos dañados, y hasta ahora eso era indistinguible de una laguna del archivo.
 

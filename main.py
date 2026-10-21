@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 from database import ConsultasDatabase, DATABASE_PATH
 from background_simulator import BackgroundSimulator
 from recover import RecoverFiles  # Importar el procesador real
-from s3_recover import _s3_circuit_breaker
+from s3_recover import _s3_circuit_breaker, ruta_registro_s3
 from processors import HistoricQueryProcessor
 from schemas import HistoricQueryRequest
 from datetime import datetime
@@ -672,6 +672,9 @@ async def eliminar_consulta(request: Request, consulta_id: str, purge: bool = Fa
                 raise HTTPException(status_code=400, detail="Ruta de destino inválida para purge.")
             if os.path.isdir(target):
                 shutil.rmtree(target)
+            # El registro de lo que bajó S3 vive fuera del directorio (ver
+            # s3_recover.ruta_registro_s3); sin esto quedaría huérfano.
+            ruta_registro_s3(DOWNLOAD_PATH, consulta_id).unlink(missing_ok=True)
         except HTTPException:
             raise
         except Exception as e:
