@@ -89,7 +89,12 @@ class BucleDeCola:
         self.consulta_en_curso: Optional[str] = None
         self._parar = threading.Event()
         self._hilo: Optional[threading.Thread] = None
-        self._ultimo_barrido = 0.0
+        # -inf y no 0.0: time.monotonic() cuenta desde que arrancó la
+        # máquina, así que con 0.0 la primera vuelta sólo barría si la
+        # máquina llevaba encendida más de `barrido_s`. En un runner de CI
+        # recién creado nunca pasaba (el CI estuvo en rojo por esto desde
+        # 3da66d6), y en tahan tras un reinicio retrasaba el primer barrido.
+        self._ultimo_barrido = float("-inf")
 
     # -- ciclo de vida -------------------------------------------------
 

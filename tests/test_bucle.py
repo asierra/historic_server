@@ -187,6 +187,24 @@ def test_el_barrido_respeta_su_intervalo(db):
     assert len(llamadas) == 1, "debería barrer una vez, no en cada vuelta"
 
 
+def test_la_primera_vuelta_barre_aunque_la_maquina_acabe_de_arrancar(db, monkeypatch):
+    """time.monotonic() cuenta desde el arranque de la máquina. Con el último
+    barrido en 0.0, una máquina encendida hace menos de `barrido_s` no barría
+    en la primera vuelta: en un runner de CI recién creado, nunca. Por eso la
+    prueba de arriba pasaba aquí y fallaba en GitHub."""
+    monkeypatch.setattr("cola.time.monotonic", lambda: 12.0)  # 12 s de uptime
+    llamadas = []
+    bucle = _bucle(db, RecoverFalso(), barrido_s=3600)
+    bucle.db = type("Espia", (), {
+        "liberar_expiradas": lambda self, **kw: llamadas.append(1),
+        "hay_trabajo": lambda self: False,
+    })()
+
+    bucle.una_vuelta()
+
+    assert llamadas == [1]
+
+
 # --------------------------------------------------------------------------
 # Intervalo de barrido
 # --------------------------------------------------------------------------
