@@ -424,3 +424,43 @@ def test_el_journal_separa_lo_bajado_de_lo_que_ya_estaba(arboles, tmp_path, nube
 
     final = [r.getMessage() for r in caplog.records if r.getMessage().startswith("S3 finalizado")]
     assert final == ["S3 finalizado: 2 objetivos; 1 bajados ahora, 1 ya en destino, 0 fallidos (consulta_id=LOGMIX01)"]
+
+
+# --- .tgz copiado entero: S3 no tiene nombres de .nc con qué compararlo ------
+
+BANDAS_TODAS = [f"{i:02d}" for i in range(1, 17)]
+
+
+def test_l1b_tgz_entero_s3_no_repite_ese_instante(arboles, tmp_path, nube):
+    """L1b con todas las bandas en el árbol semanal: se copia el .tgz, que trae
+    las 16 bandas de un instante. Antes S3 volvía a bajarlas sueltas."""
+    semanal, _ = arboles
+    _tgz_semanal(semanal, "2025300", "1200", [_nc_l1b("C", b, "2025300", "1200") for b in BANDAS_TODAS])
+    otro_instante = _nc_l1b("C", "13", "2025300", "1205")  # éste Lustre no lo tiene
+    n = nube([_remoto(_nc_l1b("C", b, "2025300", "1200")) for b in BANDAS_TODAS] + [_remoto(otro_instante)])
+    q = dict(QUERY_L1B, bandas=BANDAS_TODAS, fechas={"2025300": ["12:00-12:09"]},
+             _original_request={"bandas": ["ALL"], "productos": []})
+
+    r = _correr(arboles, tmp_path, "TGZL1B01", q)
+
+    assert n.pedidos == [otro_instante]
+    assert r["fuentes"]["lustre"]["archivos"] == ["ABI-L1b-RadC-M6_G19-s20253001200.tgz"]
+    assert r["fuentes"]["s3"]["archivos"] == [otro_instante]
+
+
+def test_l2_tgz_entero_s3_pide_solo_lo_que_el_tgz_no_trae(arboles, tmp_path, nube):
+    """En L2 el contenido de un .tgz varía, así que no basta con el minuto:
+    se lee la lista de miembros. Aquí el .tgz no trae DMW y S3 sí."""
+    semanal, _ = arboles
+    cg = "CG_ABI-L2-ACHAC-M6_G19_s20253001201174_e20253001203559_c1.nc"
+    _tgz_semanal(semanal, "2025300", "1201", [cg], nivel="l2")
+    dmw = "OR_ABI-L2-DMWC-M6C07_G19_s20253001201174_e20253001203559_c2.nc"
+    n = nube([_remoto("OR_ABI-L2-ACHAC-M6_G19_s20253001201174_e20253001203548_c3.nc"), _remoto(dmw)])
+    q = {"sensor": "abi", "nivel": "L2", "dominio": "conus", "productos": ["ALL"], "bandas": BANDAS_TODAS,
+         "fechas": {"2025300": ["12:00-12:05"]},
+         "_original_request": {"productos": ["ALL"], "bandas": ["ALL"]}}
+
+    r = _correr(arboles, tmp_path, "TGZL2001", q)
+
+    assert n.pedidos == [dmw]
+    assert r["fuentes"]["s3"]["archivos"] == [dmw]

@@ -74,6 +74,15 @@ def consulta_para_lustre(query_dict: Dict) -> Dict:
     return q
 
 
+_MINUTO_RE = re.compile(r'[-_]s(\d{11})')
+
+
+def minuto_de_archivo(nombre: str) -> Optional[str]:
+    """AAAAJJJHHMM del inicio, en `.tgz` (`-s`) y `.nc` (`_s`) por igual."""
+    m = _MINUTO_RE.search(nombre)
+    return m.group(1) if m else None
+
+
 # --- Clase para recuperación local (Lustre) ---
 class LustreRecoverFiles:
     """Busca archivos en los dos árboles de Lustre.
@@ -327,6 +336,9 @@ class RecoverFiles:
             # S3 lo usa para no volver a bajar lo mismo con otro prefijo, y el
             # reporte para no adjudicarle a S3 lo que copió Lustre.
             nombres_de_lustre: set = set()
+            # Instantes (AAAAJJJHHMM) que Lustre entregó completos dentro de un
+            # .tgz de L1b copiado entero: ahí no hay nombres de .nc que comparar.
+            minutos_de_lustre: set = set()
             archivos_pendientes_local: List[Path] = []
 
             # ¿Está Lustre ahí? Se comprueba la raíz una vez, antes de recorrer
@@ -415,7 +427,10 @@ class RecoverFiles:
                     for i, future in enumerate(as_completed(list(future_to_objetivo.keys()))):
                         archivo_fuente = future_to_objetivo[future]
                         try:
-                            nombres_de_lustre.update(p.name for p in (future.result() or []))
+                            _, cubiertos, minuto = future.result()
+                            nombres_de_lustre.update(cubiertos)
+                            if minuto:
+                                minutos_de_lustre.add(minuto)
                             mensaje = f"Recuperado archivo {i+1}/{total_pendientes} ({archivo_fuente.name})"
                         except TimeoutError:
                             self.logger.error(f"❌ Timeout en archivo {archivo_fuente.name}")
@@ -473,6 +488,7 @@ class RecoverFiles:
                 objetivos_finales_s3 = [
                     o for o in set(archivos_s3_filtrados)
                     if clave_de_archivo(Path(o).name) not in claves_de_lustre
+                    and minuto_de_archivo(Path(o).name) not in minutos_de_lustre
                 ]
                 # Publicar un mensaje con conteo antes de iniciar descargas
                 try:
@@ -718,15 +734,23 @@ def _barrer_temporales(directorio_destino: Path) -> None:
                 ruta.unlink(missing_ok=True)
 
 
-def _process_safe_recover_file(archivo_fuente: Path, directorio_destino: Path, nivel: str, productos_solicitados_list: List[str], bandas_solicitadas_list: List[str]) -> List[Path]:
+def _process_safe_recover_file(archivo_fuente: Path, directorio_destino: Path, nivel: str, productos_solicitados_list: List[str], bandas_solicitadas_list: List[str]):
     """
     Función segura para procesos que procesa un único archivo de Lustre.
     Un `.nc` del árbol diario ya viene seleccionado por banda/producto y sólo
     se copia; un `.tgz` del semanal se copia entero o se extrae en parte
     según la consulta.
+
+    Devuelve (escritos, cubiertos, minuto):
+    - escritos: rutas que quedaron en destino.
+    - cubiertos: nombres de .nc que esto entrega, para que S3 no los repita.
+    - minuto: AAAAJJJHHMM si se copió entero un .tgz de L1b, que trae siempre
+      las 16 bandas de un solo instante (verificado en cirrus, 21-oct-2026):
+      S3 puede saltarse ese minuto sin abrir el .tgz.
     """
     if archivo_fuente.suffix == '.nc':
-        return [_copiar_atomico(archivo_fuente, directorio_destino)]
+        escrito = _copiar_atomico(archivo_fuente, directorio_destino)
+        return [escrito], [escrito.name], None
 
     archivos_recuperados = []
     
@@ -763,8 +787,15 @@ def _process_safe_recover_file(archivo_fuente: Path, directorio_destino: Path, n
     )
 
     if copiar_tgz_completo:
-        archivos_recuperados.append(_copiar_atomico(archivo_fuente, directorio_destino))
-        return archivos_recuperados
+        escrito = _copiar_atomico(archivo_fuente, directorio_destino)
+        if nivel_upper == 'L1B':
+            return [escrito], [], minuto_de_archivo(archivo_fuente.name)
+        # En L2 el contenido varía entre .tgz (no todos traen DMW, p. ej.):
+        # hay que leer la lista. Cuesta descomprimirlo, pero sólo pasa con
+        # productos y bandas "ALL", y sale más barato que bajarlo otra vez.
+        with tarfile.open(escrito, "r:gz") as tar:
+            cubiertos = [Path(n).name for n in tar.getnames() if n.endswith('.nc')]
+        return [escrito], cubiertos, None
 
     # --- Lógica de extracción selectiva ---
     try:
@@ -819,4 +850,4 @@ def _process_safe_recover_file(archivo_fuente: Path, directorio_destino: Path, n
         logging.error(f"❌ Error al procesar el archivo tar {archivo_fuente.name} (posiblemente corrupto): {e}")
         raise
 
-    return archivos_recuperados
+    return archivos_recuperados, [p.name for p in archivos_recuperados], None
