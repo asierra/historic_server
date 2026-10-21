@@ -51,6 +51,21 @@ _LUSTRE_TIMESTAMP_RE = re.compile(r'[-_]s(\d{4})(\d{3})(\d{2})(\d{2})')
 _LETRA_DOMINIO = {"conus": "C", "fd": "F"}
 
 
+def clave_de_archivo(nombre: str) -> Optional[str]:
+    """Identidad de un .nc sin su origen: producto, banda, satélite e inicio.
+
+    `CG_ABI-L2-CTPC-M6_G19_s20262901201174_e..._c....nc` (Lustre, procesado en
+    LANOT) y `OR_ABI-L2-CTPC-M6_G19_s20262901201174_e..._c....nc` (NOAA, en S3)
+    son el mismo producto del mismo instante: comparten clave. Se quita el
+    prefijo de origen y todo desde `_e`, porque fin y creación difieren entre
+    los dos. Devuelve None si el nombre no tiene esa forma (p. ej. un .tgz).
+    """
+    prefijo, sep, resto = nombre.partition('_')
+    if not sep or '_s' not in resto or '_e' not in resto:
+        return None
+    return resto.split('_e', 1)[0]
+
+
 # --- Clase para recuperación local (Lustre) ---
 class LustreRecoverFiles:
     """Busca archivos en los dos árboles de Lustre.
@@ -255,6 +270,10 @@ class RecoverFiles:
             self.db.actualizar_estado(consulta_id, "procesando", 10, "Preparando entorno")
 
             objetivos_fallidos_local = []
+            # Lo que Lustre dejó en destino (o ya estaba de una corrida previa).
+            # S3 lo usa para no volver a bajar lo mismo con otro prefijo, y el
+            # reporte para no adjudicarle a S3 lo que copió Lustre.
+            nombres_de_lustre: set = set()
             archivos_pendientes_local: List[Path] = []
 
             # ¿Está Lustre ahí? Se comprueba la raíz una vez, antes de recorrer
@@ -308,6 +327,12 @@ class RecoverFiles:
                 # 3. Escanear destino
                 if archivos_a_procesar_local:
                     archivos_pendientes_local = self.lustre.scan_existing_files(archivos_a_procesar_local, directorio_destino)
+                    # Los .nc que ya estaban en destino cuentan como de Lustre.
+                    pendientes_set = set(archivos_pendientes_local)
+                    nombres_de_lustre.update(
+                        a.name for a in archivos_a_procesar_local
+                        if a.suffix == '.nc' and a not in pendientes_set
+                    )
                     if not archivos_pendientes_local:
                         pass
                 else:
@@ -342,7 +367,7 @@ class RecoverFiles:
                     for i, future in enumerate(as_completed(list(future_to_objetivo.keys()))):
                         archivo_fuente = future_to_objetivo[future]
                         try:
-                            future.result()
+                            nombres_de_lustre.update(p.name for p in (future.result() or []))
                             mensaje = f"Recuperado archivo {i+1}/{total_pendientes} ({archivo_fuente.name})"
                         except TimeoutError:
                             self.logger.error(f"❌ Timeout en archivo {archivo_fuente.name}")
@@ -392,7 +417,15 @@ class RecoverFiles:
                 for fecha_jjj, horarios_list in query_dict.get('fechas', {}).items():
                     archivos_encontrados = [s3_map[k] for k in s3_map]
                     archivos_s3_filtrados += filter_files_by_time(archivos_encontrados, fecha_jjj, horarios_list)
-                objetivos_finales_s3 = list(set(archivos_s3_filtrados))
+                # Fuera lo que Lustre ya entregó, aunque se llame distinto:
+                # en L2 Lustre trae `CG_` y S3 `OR_`, y por nombre exacto se
+                # bajaban los dos. En L1b el nombre es idéntico, y S3 se daba
+                # por «ya presente» y se lo apuntaba en el reporte.
+                claves_de_lustre = {clave_de_archivo(n) for n in nombres_de_lustre} - {None}
+                objetivos_finales_s3 = [
+                    o for o in set(archivos_s3_filtrados)
+                    if clave_de_archivo(Path(o).name) not in claves_de_lustre
+                ]
                 # Publicar un mensaje con conteo antes de iniciar descargas
                 try:
                     total_s3 = len(objetivos_finales_s3)
@@ -405,9 +438,12 @@ class RecoverFiles:
                 )
                 # Excluir de las fallas locales los archivos que S3 sí recuperó,
                 # para no contarlos como fallidos en el mensaje final.
-                s3_recuperados_nombres = {f.name for f in s3_recuperados}
+                # Por clave y no por nombre: un `CG_` que falló en Lustre lo
+                # cubre el `OR_` que bajó S3.
+                s3_recuperados_claves = {clave_de_archivo(f.name) for f in s3_recuperados}
                 objetivos_fallidos_final = (
-                    [f for f in objetivos_fallidos_local if f.name not in s3_recuperados_nombres]
+                    [f for f in objetivos_fallidos_local
+                     if f.suffix != '.nc' or clave_de_archivo(f.name) not in s3_recuperados_claves]
                     + list(objetivos_fallidos_s3)
                 )
             else:

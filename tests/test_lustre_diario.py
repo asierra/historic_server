@@ -222,3 +222,94 @@ def test_sin_ninguna_raiz_lustre_esta_no_disponible(tmp_path):
     ).procesar_consulta("NIGUNA01", q)
 
     assert db.obtener_consulta("NIGUNA01")["resultados"]["fuentes"]["lustre"]["estado"] == "no_disponible"
+
+
+# --- Lustre y S3 juntos: que no se dupliquen ni se roben el crédito ---------
+#
+# Visto en tahan el 21-oct-2026, con las dos primeras consultas tras el
+# despliegue: en L2 (`6CpX7lyr`) S3 bajó el `OR_` de cada `CG_` que Lustre ya
+# había copiado; en L1b (`XQ3endmW`) los nombres son idénticos, S3 se dio por
+# «ya presente» y el reporte dijo L=0, S=2 cuando todo vino de Lustre.
+
+from recover import clave_de_archivo  # noqa: E402
+
+
+def test_la_clave_ignora_el_prefijo_de_origen_y_los_tiempos_de_fin_y_creacion():
+    cg = "CG_ABI-L2-CTPC-M6_G19_s20262901201174_e20262901203559_c20262900606140.nc"
+    o_r = "OR_ABI-L2-CTPC-M6_G19_s20262901201174_e20262901203548_c20262901205232.nc"
+    otra_banda = "OR_ABI-L2-CMIPC-M6C14_G19_s20262901201174_e20262901203559_c1.nc"
+    assert clave_de_archivo(cg) == clave_de_archivo(o_r)
+    assert clave_de_archivo(otra_banda) != clave_de_archivo(
+        "OR_ABI-L2-CMIPC-M6C13_G19_s20262901201174_e20262901203559_c1.nc")
+    assert clave_de_archivo("ABI-L1b-RadC-M6_G19-s20260501201.tgz") is None
+
+
+class _S3Falso:
+    """Ofrece unos objetos y registra cuáles se le piden de verdad."""
+
+    def __init__(self, objetos):
+        self.objetos = objetos
+        self.pedidos = []
+
+    def discover_files(self, query_dict, fecha_g19):
+        return {o: o for o in self.objetos}
+
+    def download_files(self, consulta_id, archivos, destino, db):
+        recuperados = []
+        for o in archivos:
+            self.pedidos.append(o)
+            ruta = destino / o.rsplit("/", 1)[-1]
+            if not ruta.exists():
+                ruta.write_bytes(b"s3")
+            recuperados.append(ruta)
+        return recuperados, []
+
+
+def _correr(arboles, tmp_path, cid, q, s3):
+    semanal, diario = arboles
+    db = ConsultasDatabase(str(tmp_path / "c.db"))
+    assert db.crear_consulta(cid, q)
+    rf = RecoverFiles(
+        db=db, source_data_path=str(semanal), source_path_diario=str(diario),
+        base_download_path=str(tmp_path / "descargas"), executor=_PoolEnLinea(),
+        s3_enabled=True, lustre_enabled=True, max_workers=1,
+    )
+    rf.s3 = s3
+    rf.procesar_consulta(cid, q)
+    return db.obtener_consulta(cid)["resultados"]
+
+
+def test_l2_s3_no_baja_el_or_de_lo_que_lustre_trajo_como_cg(arboles, tmp_path):
+    _, diario = arboles
+    d = diario / "l2" / "abi" / "conus" / "2026" / "290" / "CTPC"
+    d.mkdir(parents=True)
+    (d / "CG_ABI-L2-CTPC-M6_G19_s20262901201174_e20262901203559_c20262900606140.nc").write_bytes(b"x")
+    s3 = _S3Falso([
+        "noaa-goes19/ABI-L2-CTPC/2026/290/12/OR_ABI-L2-CTPC-M6_G19_s20262901201174_e20262901203548_c20262901205232.nc",
+        # Uno que Lustre no tiene: ése sí debe bajarse.
+        "noaa-goes19/ABI-L2-CTPC/2026/290/12/OR_ABI-L2-CTPC-M6_G19_s20262901206174_e20262901208548_c20262901210202.nc",
+    ])
+    q = {"sensor": "abi", "nivel": "L2", "dominio": "conus", "productos": ["CTP"], "bandas": [],
+         "fechas": {"2026290": ["12:00-12:10"]}, "_original_request": {"productos": ["CTP"], "bandas": []}}
+
+    r = _correr(arboles, tmp_path, "L2DUPLI1", q, s3)
+
+    assert [p.rsplit("/", 1)[-1][:40] for p in s3.pedidos] == ["OR_ABI-L2-CTPC-M6_G19_s20262901206174_e2"]
+    assert r["fuentes"]["lustre"]["total"] == 1
+    assert r["fuentes"]["s3"]["total"] == 1
+    assert r["total_archivos"] == 2
+
+
+def test_l1b_lo_que_copio_lustre_no_se_le_adjudica_a_s3(arboles, tmp_path):
+    _, diario = arboles
+    _dia_l1b(diario, "2026291", bandas=("10",), horas=("0000",))
+    nombre = _nc_l1b("C", "10", "2026291", "0000")
+    s3 = _S3Falso([f"noaa-goes19/ABI-L1b-RadC/2026/291/00/{nombre}"])
+    q = dict(QUERY_L1B, bandas=["10"], fechas={"2026291": ["00:00-00:10"]},
+             _original_request={"bandas": ["10"], "productos": []})
+
+    r = _correr(arboles, tmp_path, "L1BCRED1", q, s3)
+
+    assert s3.pedidos == []
+    assert r["fuentes"]["lustre"]["total"] == 1
+    assert r["fuentes"]["s3"]["total"] == 0
